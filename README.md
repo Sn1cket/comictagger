@@ -165,20 +165,13 @@ winget install ComicTagger.ComicTagger
             <br />
             <sub><b>rhaussmann</b></sub>
         </a>
-    </td>
+    </td></tr>
+<tr>
     <td align="center">
         <a href="https://github.com/AlbanSeurat">
             <img src="https://avatars.githubusercontent.com/u/500180?v=4" width="100;" alt="AlbanSeurat"/>
             <br />
             <sub><b>AlbanSeurat</b></sub>
-        </a>
-    </td></tr>
-<tr>
-    <td align="center">
-        <a href="https://github.com/Sn1cket">
-            <img src="https://avatars.githubusercontent.com/u/32904645?v=4" width="100;" alt="Sn1cket"/>
-            <br />
-            <sub><b>Sn1cket</b></sub>
         </a>
     </td>
     <td align="center">
@@ -201,8 +194,7 @@ winget install ComicTagger.ComicTagger
             <br />
             <sub><b>PawlakMarek</b></sub>
         </a>
-    </td></tr>
-<tr>
+    </td>
     <td align="center">
         <a href="https://github.com/DrMcCoy">
             <img src="https://avatars.githubusercontent.com/u/156130?v=4" width="100;" alt="DrMcCoy"/>
