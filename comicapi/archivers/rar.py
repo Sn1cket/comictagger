@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import pathlib
@@ -7,7 +8,6 @@ import platform
 import shutil
 import subprocess
 import tempfile
-import time
 
 from comicapi.archivers import Archiver
 
@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 
 if not rar_support:
     logger.error("rar unavailable")
+# windows only, keeps the cmd.exe from popping up
+STARTUPINFO = None
+if platform.system() == "Windows":
+    STARTUPINFO = subprocess.STARTUPINFO()  # type: ignore
+    STARTUPINFO.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # type: ignore
 
 
 class RarArchiver(Archiver):
@@ -30,22 +35,22 @@ class RarArchiver(Archiver):
 
     enabled = rar_support
     exe = "rar"
+    supported_extensions = frozenset({".cbr", ".rar"})
+
+    _rar: rarfile.RarFile | None = None
+    _rar_setup: rarfile.ToolSetup | None = None
+    _writeable: bool | None = None
 
     def __init__(self) -> None:
         super().__init__()
-
-        # windows only, keeps the cmd.exe from popping up
-        if platform.system() == "Windows":
-            self.startupinfo = subprocess.STARTUPINFO()  # type: ignore
-            self.startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # type: ignore
-        else:
-            self.startupinfo = None
+        self._filename_list: list[str] = []
 
     def get_comment(self) -> str:
         rarc = self.get_rar_obj()
         return (rarc.comment if rarc else "") or ""
 
     def set_comment(self, comment: str) -> bool:
+        self._reset()
         if rar_support and self.exe:
             try:
                 # write comment to temp file
@@ -66,7 +71,7 @@ class RarArchiver(Archiver):
                     ]
                     result = subprocess.run(
                         proc_args,
-                        startupinfo=self.startupinfo,
+                        startupinfo=STARTUPINFO,
                         stdin=subprocess.DEVNULL,
                         capture_output=True,
                         encoding="utf-8",
@@ -80,16 +85,11 @@ class RarArchiver(Archiver):
                         result.stderr,
                     )
                     return False
-
-                if platform.system() == "Darwin":
-                    time.sleep(1)
             except OSError as e:
                 logger.exception("Error writing comment to rar archive [%s]: %s", e, self.path)
                 return False
-            else:
-                return True
-        else:
-            return False
+            return True
+        return False
 
     def supports_comment(self) -> bool:
         return True
@@ -119,7 +119,6 @@ class RarArchiver(Archiver):
 
             except OSError as e:
                 logger.error("Error reading rar archive [%s]: %s :: %s :: tries #%d", e, self.path, archive_file, tries)
-                time.sleep(1)
             except Exception as e:
                 logger.error(
                     "Unexpected exception reading rar archive [%s]: %s :: %s :: tries #%d",
@@ -140,20 +139,19 @@ class RarArchiver(Archiver):
         raise OSError
 
     def remove_file(self, archive_file: str) -> bool:
+        self._reset()
         if self.exe:
             working_dir = os.path.dirname(os.path.abspath(self.path))
             # use external program to remove file from Rar archive
             result = subprocess.run(
                 [self.exe, "d", f"-w{working_dir}", "-c-", self.path, archive_file],
-                startupinfo=self.startupinfo,
+                startupinfo=STARTUPINFO,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 encoding="utf-8",
                 cwd=self.path.absolute().parent,
             )
 
-            if platform.system() == "Darwin":
-                time.sleep(1)
             if result.returncode != 0:
                 logger.error(
                     "Error removing file from rar archive [exitcode: %d]: %s :: %s",
@@ -163,10 +161,10 @@ class RarArchiver(Archiver):
                 )
                 return False
             return True
-        else:
-            return False
+        return False
 
     def write_file(self, archive_file: str, data: bytes) -> bool:
+        self._reset()
         if self.exe:
             archive_path = pathlib.PurePosixPath(archive_file)
             archive_name = archive_path.name
@@ -186,13 +184,11 @@ class RarArchiver(Archiver):
                     self.path,
                 ],
                 input=data,
-                startupinfo=self.startupinfo,
+                startupinfo=STARTUPINFO,
                 capture_output=True,
                 cwd=self.path.absolute().parent,
             )
 
-            if platform.system() == "Darwin":
-                time.sleep(1)
             if result.returncode != 0:
                 logger.error(
                     "Error writing rar archive [exitcode: %d]: %s :: %s :: %s",
@@ -202,12 +198,12 @@ class RarArchiver(Archiver):
                     result.stderr,
                 )
                 return False
-            else:
-                return True
-        else:
-            return False
+            return True
+        return False
 
     def get_filename_list(self) -> list[str]:
+        if self._filename_list:
+            return self._filename_list
         rarc = self.get_rar_obj()
         tries = 0
         if rar_support and rarc:
@@ -221,9 +217,9 @@ class RarArchiver(Archiver):
 
                 except OSError as e:
                     logger.error("Error listing files in rar archive [%s]: %s :: attempt #%d", e, self.path, tries)
-                    time.sleep(1)
 
                 else:
+                    self._filename_list = namelist
                     return namelist
         return []
 
@@ -232,6 +228,7 @@ class RarArchiver(Archiver):
 
     def copy_from_archive(self, other_archive: Archiver) -> bool:
         """Replace the current archive with one copied from another archive"""
+        self._reset()
         try:
             with tempfile.TemporaryDirectory() as tmp_dir:
                 tmp_path = pathlib.Path(tmp_dir)
@@ -249,7 +246,7 @@ class RarArchiver(Archiver):
                 result = subprocess.run(
                     [self.exe, "a", f"-w{working_dir}", "-r", "-c-", str(rar_path.absolute()), "."],
                     cwd=rar_cwd.absolute(),
-                    startupinfo=self.startupinfo,
+                    startupinfo=STARTUPINFO,
                     stdin=subprocess.DEVNULL,
                     capture_output=True,
                     encoding="utf-8",
@@ -271,22 +268,13 @@ class RarArchiver(Archiver):
         else:
             return True
 
+    @classmethod
+    @functools.cache
+    def _log_not_writeable(cls, exe: str) -> None:
+        logger.warning("Unable to find a useable copy of %r, will not be able to write rar files", exe)
+
     def is_writable(self) -> bool:
-        try:
-            if bool(self.exe and (os.path.exists(self.exe) or shutil.which(self.exe))):
-                return (
-                    subprocess.run(
-                        (self.exe,),
-                        startupinfo=self.startupinfo,
-                        capture_output=True,
-                        cwd=self.path.absolute().parent,
-                    )
-                    .stdout.strip()
-                    .startswith(b"RAR")
-                )
-        except OSError:
-            ...
-        return False
+        return bool(self._writeable and bool(self.exe and (os.path.exists(self.exe) or shutil.which(self.exe))))
 
     def extension(self) -> str:
         return ".cbr"
@@ -295,28 +283,63 @@ class RarArchiver(Archiver):
         return "RAR"
 
     @classmethod
-    def is_valid(cls, path: pathlib.Path) -> bool:
-        if rar_support:
-            # Try using exe
+    def _setup_rar(cls) -> None:
+        if cls._rar_setup is None:
+            assert rarfile
             orig = rarfile.UNRAR_TOOL
             rarfile.UNRAR_TOOL = cls.exe
             try:
-                return rarfile.is_rarfile(str(path)) and rarfile.tool_setup(sevenzip=False, sevenzip2=False, force=True)
+                cls._rar_setup = rarfile.tool_setup(sevenzip=False, sevenzip2=False, force=True)
             except rarfile.RarCannotExec:
                 rarfile.UNRAR_TOOL = orig
 
+            try:
+                cls._rar_setup = rarfile.tool_setup(force=True)
+            except rarfile.RarCannotExec as e:
+                logger.info(e)
+        if cls._writeable is None:
+            try:
+                cls._writeable = (
+                    subprocess.run(
+                        (cls.exe,),
+                        startupinfo=STARTUPINFO,
+                        capture_output=True,
+                        # cwd=cls.path.absolute().parent,
+                    )
+                    .stdout.strip()
+                    .startswith(b"RAR")
+                )
+            except OSError:
+                cls._writeable = False
+
+        if not cls._writeable:
+            cls._log_not_writeable(cls.exe or "rar")
+
+    @classmethod
+    def is_valid(cls, path: pathlib.Path) -> bool:
+        if rar_support:
+            assert rarfile
+            cls._setup_rar()
+
             # Fallback to standard
             try:
-                return rarfile.is_rarfile(str(path)) and rarfile.tool_setup(force=True)
+                return rarfile.is_rarfile(str(path))
             except rarfile.RarCannotExec as e:
                 logger.info(e)
         return False
 
+    def _reset(self) -> None:
+        self._rar = None
+        self._filename_list = []
+
     def get_rar_obj(self) -> rarfile.RarFile | None:
+        if self._rar is not None:
+            return self._rar
         if rar_support:
             try:
                 rarc = rarfile.RarFile(str(self.path))
-            except (OSError, rarfile.RarFileError) as e:
+                self._rar = rarc
+            except (OSError, rarfile.Error) as e:
                 logger.error("Unable to get rar object [%s]: %s", e, self.path)
             else:
                 return rarc

@@ -20,31 +20,41 @@ import logging
 import operator
 
 import natsort
-from PyQt5 import QtCore, QtWidgets, uic
+from PyQt6 import QtCore, QtWidgets, uic
 
 from comicapi import utils
+from comicapi.comicarchive import tags
 from comicapi.genericmetadata import Credit
-from comictaggerlib.ui import ui_path
+from comictaggerlib.ui import qtutils, ui_path
+from comictaggerlib.ui.qtutils import enable_widget
 
 logger = logging.getLogger(__name__)
 
 
 class CreditEditorWindow(QtWidgets.QDialog):
-    ModeEdit = 0
-    ModeNew = 1
+    creditChanged = QtCore.pyqtSignal(Credit, int)
 
-    def __init__(self, parent: QtWidgets.QWidget, mode: int, credit: Credit) -> None:
+    def __init__(
+        self, parent: QtWidgets.QWidget, tags: list[str], row: int, credit: Credit, title: str = "New Credit"
+    ) -> None:
         super().__init__(parent)
 
         with (ui_path / "crediteditorwindow.ui").open(encoding="utf-8") as uifile:
             uic.loadUi(uifile, self)
 
-        self.mode = mode
+        self.md_attributes = {
+            "credits.person": self.leName,
+            "credits.language": self.cbLanguage,
+            "credits.role": self.cbRole,
+            "credits.primary": self.cbPrimary,
+        }
 
-        if self.mode == self.ModeEdit:
-            self.setWindowTitle("Edit Credit")
-        else:
-            self.setWindowTitle("New Credit")
+        self.credit = credit
+        self.row = row
+        self.tags = tags
+
+        self.setWindowTitle(title)
+        self.setModal(True)
 
         # Add the entries to the role combobox
         self.cbRole.addItem("")
@@ -86,13 +96,29 @@ class CreditEditorWindow(QtWidgets.QDialog):
                 self.cbLanguage.setCurrentIndex(i)
 
         self.cbPrimary.setChecked(credit.primary)
+        self.update_tag_tweaks()
 
     def get_credit(self) -> Credit:
         lang = self.cbLanguage.currentData() or self.cbLanguage.currentText()
         return Credit(self.leName.text(), self.cbRole.currentText(), self.cbPrimary.isChecked(), lang)
 
+    def update_tag_tweaks(self) -> None:
+        # depending on the current data tag, certain fields are disabled
+        enabled_widgets = set()
+        for tag_id in self.tags:
+            if not tags[tag_id].enabled:
+                continue
+            enabled_widgets.update(tags[tag_id].supported_attributes)
+
+        for md_field, widget in self.md_attributes.items():
+            if widget is not None and not isinstance(widget, (int)):
+                enable_widget(widget, md_field in enabled_widgets)
+
     def accept(self) -> None:
         if self.leName.text() == "":
-            QtWidgets.QMessageBox.warning(self, "Whoops", "You need to enter a name for a credit.")
-        else:
-            QtWidgets.QDialog.accept(self)
+            return qtutils.warning(self, "Whoops", "You need to enter a name for a credit.")
+
+        QtWidgets.QDialog.accept(self)
+        new = self.get_credit()
+        if self.credit != new:
+            self.creditChanged.emit(new, self.row)

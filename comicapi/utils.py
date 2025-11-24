@@ -15,6 +15,8 @@
 # limitations under the License.
 from __future__ import annotations
 
+import difflib
+import hashlib
 import json
 import logging
 import os
@@ -22,7 +24,7 @@ import pathlib
 import platform
 import sys
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from enum import Enum, auto
 from shutil import which  # noqa: F401
 from typing import Any, Callable, TypeVar, cast
@@ -45,6 +47,45 @@ except ImportError:
 
 
 if sys.version_info < (3, 11):
+
+    def file_digest(fileobj, digest, /, *, _bufsize=2**18):  # type: ignore[no-untyped-def]
+        """Hash the contents of a file-like object. Returns a digest object.
+
+        *fileobj* must be a file-like object opened for reading in binary mode.
+        It accepts file objects from open(), io.BytesIO(), and SocketIO objects.
+        The function may bypass Python's I/O and use the file descriptor *fileno*
+        directly.
+
+        *digest* must either be a hash algorithm name as a *str*, a hash
+        constructor, or a callable that returns a hash object.
+        """
+        # On Linux we could use AF_ALG sockets and sendfile() to archive zero-copy
+        # hashing with hardware acceleration.
+        if isinstance(digest, str):
+            digestobj = hashlib.new(digest)
+        else:
+            digestobj = digest()
+
+        if hasattr(fileobj, "getbuffer"):
+            # io.BytesIO object, use zero-copy buffer
+            digestobj.update(fileobj.getbuffer())
+            return digestobj
+
+        # Only binary files implement readinto().
+        if not (hasattr(fileobj, "readinto") and hasattr(fileobj, "readable") and fileobj.readable()):
+            raise ValueError(f"'{fileobj!r}' is not a file-like object in binary reading mode.")
+
+        # binary file, socket.SocketIO object
+        # Note: socket I/O uses different syscalls than file I/O.
+        buf = bytearray(_bufsize)  # Reusable buffer to reduce allocations.
+        view = memoryview(buf)
+        while True:
+            size = fileobj.readinto(buf)
+            if size == 0:
+                break  # EOF
+            digestobj.update(view[:size])
+
+        return digestobj
 
     class StrEnum(str, Enum):
         """
@@ -91,9 +132,10 @@ if sys.version_info < (3, 11):
             return self.value
 
 else:
-    from enum import StrEnum as s
+    from enum import StrEnum as _StrEnum
+    from hashlib import file_digest
 
-    class StrEnum(s):
+    class StrEnum(_StrEnum):
         @classmethod
         def _missing_(cls, value: Any) -> str | None:
             if not isinstance(value, str):
@@ -106,12 +148,16 @@ else:
 logger = logging.getLogger(__name__)
 
 
-class DefaultDict(dict):
-    def __init__(self, *args, default: Callable[[Any], Any] | None = None) -> None:
-        super().__init__(*args)
+_KT = TypeVar("_KT")
+_VT = TypeVar("_VT")
+
+
+class DefaultDict(dict[_KT, _VT]):
+    def __init__(self, *args, default: Callable[[_KT], _VT | _KT] | None = None, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        super().__init__(*args, **kwargs)
         self.default = default
 
-    def __missing__(self, key: Any) -> Any:
+    def __missing__(self, key: _KT) -> _VT | _KT:
         if self.default is None:
             return key
         return self.default(key)
@@ -129,7 +175,7 @@ def _custom_key(tup: Any) -> Any:
     lst = []
     for x in natsort.os_sort_keygen()(tup):
         ret = x
-        if len(x) > 1 and isinstance(x[1], int) and isinstance(x[0], str) and x[0] == "":
+        if isinstance(x, Sequence) and len(x) > 1 and isinstance(x[1], int) and isinstance(x[0], str) and x[0] == "":
             ret = ("a", *x[1:])
 
         lst.append(ret)
@@ -139,13 +185,16 @@ def _custom_key(tup: Any) -> Any:
 T = TypeVar("T")
 
 
-def os_sorted(lst: Iterable[T]) -> Iterable[T]:
+def os_sorted(lst: Iterable[T]) -> list[T]:
     import natsort
 
     key = _custom_key
     if icu_available or platform.system() == "Windows":
         key = natsort.os_sort_keygen()
-    return sorted(lst, key=key)
+    return sorted(sorted(lst), key=key)  # type: ignore[type-var]
+
+
+KNOWN_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"}
 
 
 def parse_filename(
@@ -313,10 +362,7 @@ def get_page_name_list(files: list[str]) -> list[str]:
     # make a sub-list of image files
     page_list = []
     for name in files:
-        if (
-            os.path.splitext(name)[1].casefold() in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"]
-            and os.path.basename(name)[0] != "."
-        ):
+        if os.path.splitext(name)[1].casefold() in KNOWN_IMAGE_EXTENSIONS and os.path.basename(name)[0] != ".":
             page_list.append(name)
     return page_list
 
@@ -459,11 +505,12 @@ def sanitize_title(text: str, basic: bool = False) -> str:
     text = text.replace('"', "")
     if not basic:
         # comicvine ignores punctuation and accents
-        # remove all characters that are not a letter, separator (space) or number
-        # replace any "dash punctuation" with a space
+        # remove all characters that are not a letter(L), separator (Z) or number (N)
+        # replace any punctuation (P) with a '-'. ComicVine search treats spaces something like an 'or' however using a dash '-' acts more like an 'and'
+        # specifically this helps with titles like 'X-Men: FF'
         # makes sure that batman-superman and self-proclaimed stay separate words
         text = "".join(
-            c if unicodedata.category(c)[0] not in "P" else " " for c in text if unicodedata.category(c)[0] in "LZNP"
+            c if unicodedata.category(c)[0] not in "P" else "-" for c in text if unicodedata.category(c)[0] in "LZNP"
         )
         # remove extra space and articles and all lower case
         text = remove_articles(text).strip()
@@ -472,19 +519,30 @@ def sanitize_title(text: str, basic: bool = False) -> str:
 
 
 def titles_match(search_title: str, record_title: str, threshold: int = 90) -> bool:
-    import rapidfuzz.fuzz
+    log_msg = "search title: %s ; record title: %s ; ratio: %d ; match threshold: %d"
+    thresh = threshold / 100
 
     sanitized_search = sanitize_title(search_title)
     sanitized_record = sanitize_title(record_title)
-    ratio = int(rapidfuzz.fuzz.ratio(sanitized_search, sanitized_record))
-    logger.debug(
-        "search title: %s ; record title: %s ; ratio: %d ; match threshold: %d",
-        search_title,
-        record_title,
-        ratio,
-        threshold,
-    )
-    return ratio >= threshold
+    s = difflib.SequenceMatcher(None, sanitized_search, sanitized_record)
+
+    ratio = s.real_quick_ratio()
+    if ratio < thresh:
+        logger.debug(log_msg, search_title, record_title, ratio * 100, threshold)
+        return False
+
+    ratio = s.quick_ratio()
+    if ratio < thresh:
+        logger.debug(log_msg, search_title, record_title, ratio * 100, threshold)
+        return False
+
+    ratio = s.ratio()
+    if ratio < thresh:
+        logger.debug(log_msg, search_title, record_title, ratio * 100, threshold)
+        return False
+
+    logger.debug(log_msg, search_title, record_title, ratio * 100, threshold)
+    return True
 
 
 def unique_file(file_name: pathlib.Path) -> pathlib.Path:
@@ -523,7 +581,7 @@ def languages() -> dict[str | None, str | None]:
     if not _languages:
         import isocodes
 
-        for alpha_2, lng in isocodes.extendend_languages._sorted_by_index(index="alpha_2"):
+        for alpha_2, lng in isocodes.extended_languages._sorted_by_index(index="alpha_2"):
             _languages[alpha_2] = lng["name"]
     return _languages.copy()
 
@@ -544,7 +602,7 @@ def get_language_iso(string: str | None) -> str | None:
 
     found = None
 
-    for lng in isocodes.extendend_languages.items:
+    for lng in isocodes.extended_languages.items:
         for x in ("alpha_2", "alpha_3", "bibliographic", "common_name", "name"):
             if x in lng and lng[x].casefold() == lang:
                 found = lng
@@ -582,7 +640,7 @@ def update_publishers(new_publishers: Mapping[str, Mapping[str, str]]) -> None:
             publishers[publisher] = ImprintDict(publisher, new_publishers[publisher])
 
 
-class ImprintDict(dict):  # type: ignore
+class ImprintDict(dict[str, str]):
     """
     ImprintDict takes a publisher and a dict or mapping of lowercased
     imprint names to the proper imprint name. Retrieving a value from an
@@ -590,14 +648,14 @@ class ImprintDict(dict):  # type: ignore
     if the key does not exist the key is returned as the publisher unchanged
     """
 
-    def __init__(self, publisher: str, mapping: tuple | Mapping = (), **kwargs: dict) -> None:  # type: ignore
+    def __init__(self, publisher: str, mapping: Mapping[str, str] = {}, **kwargs) -> None:  # type: ignore[no-untyped-def]
         super().__init__(mapping, **kwargs)
         self.publisher = publisher
 
     def __missing__(self, key: str) -> None:
         return None
 
-    def __getitem__(self, k: str) -> tuple[str, str, bool]:
+    def __getitem__(self, k: str) -> tuple[str, str, bool]:  # type: ignore[override]
         item = super().__getitem__(k.casefold())
         if k.casefold() == self.publisher.casefold():
             return "", self.publisher, True
@@ -618,3 +676,40 @@ def load_publishers() -> None:
         update_publishers(json.loads((comicapi.data.data_path / "publishers.json").read_text("utf-8")))
     except Exception:
         logger.exception("Failed to load publishers.json; The are no publishers or imprints loaded")
+
+
+__all__ = (
+    "load_publishers",
+    "file_digest",
+    "Parser",
+    "ImprintDict",
+    "os_sorted",
+    "parse_filename",
+    "norm_fold",
+    "combine_notes",
+    "parse_date_str",
+    "shorten_path",
+    "path_to_short_str",
+    "get_page_name_list",
+    "get_recursive_filelist",
+    "add_to_path",
+    "remove_from_path",
+    "xlate_int",
+    "xlate_float",
+    "xlate",
+    "split",
+    "split_urls",
+    "remove_articles",
+    "sanitize_title",
+    "titles_match",
+    "unique_file",
+    "parse_version",
+    "countries",
+    "languages",
+    "get_language_from_iso",
+    "get_language_iso",
+    "get_country_from_iso",
+    "get_publisher",
+    "update_publishers",
+    "load_publishers",
+)

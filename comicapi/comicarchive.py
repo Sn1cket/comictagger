@@ -15,7 +15,9 @@
 # limitations under the License.
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import inspect
 import io
 import itertools
 import logging
@@ -27,7 +29,7 @@ from collections.abc import Iterable
 
 from comicapi import utils
 from comicapi.archivers import Archiver, UnknownArchiver, ZipArchiver
-from comicapi.genericmetadata import GenericMetadata
+from comicapi.genericmetadata import FileHash, GenericMetadata
 from comicapi.tags import Tag
 from comictaggerlib.ctversion import version
 
@@ -121,14 +123,18 @@ def load_tag_plugins(version: str = f"ComicAPI/{version}", local_plugins: Iterab
 
 class ComicArchive:
     logo_data = b""
-    pil_available = True
+    pil_available: bool | None = None
 
     def __init__(
-        self, path: pathlib.Path | str | Archiver, default_image_path: pathlib.Path | str | None = None
+        self,
+        path: pathlib.Path | str | Archiver,
+        default_image_path: pathlib.Path | str | None = None,
+        hash_archive: str = "",
     ) -> None:
         self.md: dict[str, GenericMetadata] = {}
         self.page_count: int | None = None
         self.page_list: list[str] = []
+        self.hash_archive = hash_archive
 
         self.reset_cache()
         self.default_image_path = default_image_path
@@ -140,12 +146,20 @@ class ComicArchive:
             self.path = pathlib.Path(path).absolute()
             self.archiver = UnknownArchiver.open(self.path)
 
-        load_archive_plugins()
-        load_tag_plugins()
-        for archiver in archivers:
-            if archiver.enabled and archiver.is_valid(self.path):
-                self.archiver = archiver.open(self.path)
-                break
+            load_archive_plugins()
+            load_tag_plugins()
+            archiver_missing = True
+            for archiver in archivers:
+                if self.path.suffix in archiver.supported_extensions and archiver.is_valid(self.path):
+                    self.archiver = archiver.open(self.path)
+                    archiver_missing = False
+                    break
+
+            if archiver_missing:
+                for archiver in archivers:
+                    if archiver.enabled and archiver.is_valid(self.path):
+                        self.archiver = archiver.open(self.path)
+                        break
 
         if not ComicArchive.logo_data and self.default_image_path:
             with open(self.default_image_path, mode="rb") as fd:
@@ -228,9 +242,10 @@ class ComicArchive:
         if tag_id in self.md:
             del self.md[tag_id]
         if not tags[tag_id].enabled:
+            logger.warning("%s tags not enabled", tags[tag_id].name())
             return False
 
-        self.apply_archive_info_to_metadata(metadata, True, True)
+        self.apply_archive_info_to_metadata(metadata, True, True, hash_archive=self.hash_archive)
         return tags[tag_id].write_tags(metadata, self.archiver)
 
     def has_tags(self, tag_id: str) -> bool:
@@ -323,6 +338,7 @@ class ComicArchive:
 
     def get_page_name_list(self) -> list[str]:
         if not self.page_list:
+            self.__import_pil__()  # Import pillow for list of supported extensions
             self.page_list = utils.get_page_name_list(self.archiver.get_filename_list())
 
         return self.page_list
@@ -332,37 +348,61 @@ class ComicArchive:
             self.page_count = len(self.get_page_name_list())
         return self.page_count
 
+    def __import_pil__(self) -> bool:
+        if self.pil_available is not None:
+            return self.pil_available
+
+        try:
+            from PIL import Image
+
+            Image.init()
+            utils.KNOWN_IMAGE_EXTENSIONS.update([ext for ext, typ in Image.EXTENSION.items() if typ in Image.OPEN])
+            self.pil_available = True
+        except Exception:
+            self.pil_available = False
+            logger.exception("Failed to load Pillow")
+            return False
+        return True
+
     def apply_archive_info_to_metadata(
-        self, md: GenericMetadata, calc_page_sizes: bool = False, detect_double_page: bool = False
+        self,
+        md: GenericMetadata,
+        calc_page_sizes: bool = False,
+        detect_double_page: bool = False,
+        *,
+        hash_archive: str = "",
     ) -> None:
+        hash_archive = hash_archive
         md.page_count = self.get_number_of_pages()
         md.apply_default_page_list(self.get_page_name_list())
-        if not calc_page_sizes or not self.seems_to_be_a_comic_archive():
+        if not self.seems_to_be_a_comic_archive():
+            return
+
+        if hash_archive in hashlib.algorithms_available and not md.original_hash:
+            hasher = getattr(hashlib, hash_archive, hash_archive)
+            try:
+                with self.archiver.path.open("b+r") as archive:
+                    digest = utils.file_digest(archive, hasher)
+                if len(inspect.signature(digest.hexdigest).parameters) > 0:
+                    length = digest.name.rpartition("_")[2]
+                    if not length.isdigit():
+                        length = "128"
+                    md.original_hash = FileHash(digest.name, digest.hexdigest(int(length) // 8))  # type: ignore[call-arg]
+                else:
+                    md.original_hash = FileHash(digest.name, digest.hexdigest())
+            except Exception:
+                logger.exception("Failed to calculate original hash for '%s'", self.archiver.path)
+        if not calc_page_sizes:
             return
         for p in md.pages:
-
-            if not self.pil_available:
-                if p.byte_size is not None:
-                    data = self.get_page(p.archive_index)
-                    p.byte_size = len(data)
-                continue
-            try:
-                from PIL import Image
-
-                self.pil_available = True
-            except ImportError:
-                self.pil_available = False
-                if p.byte_size is not None:
-                    data = self.get_page(p.archive_index)
-                    p.byte_size = len(data)
-                continue
-
             if p.byte_size is None or p.height is None or p.width is None or p.double_page is None:
                 try:
                     data = self.get_page(p.archive_index)
                     p.byte_size = len(data)
-                    if not data:
+                    if not data or not self.__import_pil__():
                         continue
+
+                    from PIL import Image
 
                     im = Image.open(io.BytesIO(data))
                     w, h = im.size

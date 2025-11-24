@@ -152,11 +152,12 @@ class ComicTaggerPaths(AppDirs):
 
 
 def tag(types: str) -> list[str]:
+    enabled_tags = [tag for tag in tags if tags[tag].enabled]
     result = []
     types = types.casefold()
     for typ in utils.split(types, ","):
-        if typ not in tags:
-            choices = ", ".join(tags)
+        if typ not in enabled_tags:
+            choices = ", ".join(enabled_tags)
             raise argparse.ArgumentTypeError(f"invalid choice: {typ} (choose from {choices.upper()})")
         result.append(tags[typ].id)
     return result
@@ -193,7 +194,7 @@ def parse_metadata_from_string(mdstr: str) -> GenericMetadata:
                 else:
                     value = t(value)
         except (ValueError, TypeError):
-            raise argparse.ArgumentTypeError(f"Invalid syntax for tag '{key}': {value}")
+            raise argparse.ArgumentTypeError(f"Invalid syntax for tag {key!r}: {value!r}")
         return value
 
     md = GenericMetadata()
@@ -239,6 +240,8 @@ def parse_metadata_from_string(mdstr: str) -> GenericMetadata:
             else:
                 raise argparse.ArgumentTypeError(f"'{key}' is not a valid tag name")
         md.is_empty = empty
+    except argparse.ArgumentTypeError as e:
+        raise e
     except Exception as e:
         logger.exception("Unable to read metadata from the commandline '%s'", mdstr)
         raise Exception("Unable to read metadata from the commandline") from e

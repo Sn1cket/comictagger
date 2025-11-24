@@ -17,14 +17,13 @@
 from __future__ import annotations
 
 import dataclasses
-import functools
 import json
 import logging
 import os
 import pathlib
-import re
 import sys
 from collections.abc import Collection
+from functools import partial
 from typing import Any, TextIO
 
 from comicapi import merge, utils
@@ -34,10 +33,10 @@ from comictaggerlib.cbltransformer import CBLTransformer
 from comictaggerlib.ctsettings import ct_ns
 from comictaggerlib.filerenamer import FileRenamer, get_rename_dir
 from comictaggerlib.graphics import graphics_path
-from comictaggerlib.issueidentifier import IssueIdentifier
 from comictaggerlib.md import prepare_metadata
 from comictaggerlib.quick_tag import QuickTag
-from comictaggerlib.resulttypes import Action, IssueResult, MatchStatus, OnlineMatchResults, Result, Status
+from comictaggerlib.resulttypes import Action, MatchStatus, OnlineMatchResults, Result, Status
+from comictaggerlib.tag import identify_comic
 from comictalker.comictalker import ComicTalker, TalkerError
 
 logger = logging.getLogger(__name__)
@@ -82,6 +81,8 @@ class CLI:
         if not args:
             log_args: tuple[Any, ...] = ("",)
         elif isinstance(args[0], str):
+            if args[0] == "":
+                already_logged = True
             log_args = (args[0].strip("\n"), *args[1:])
         else:
             log_args = args
@@ -112,6 +113,7 @@ class CLI:
         for f in self.config.Runtime_Options__files:
             res, match_results = self.process_file_cli(self.config.Commands__command, f, match_results)
             results.append(res)
+            self.output("")
             if results[-1].status != Status.success:
                 return_code = 3
             if self.config.Runtime_Options__json:
@@ -121,7 +123,7 @@ class CLI:
 
         self.post_process_matches(match_results)
 
-        if self.config.Auto_Tag__online:
+        if self.config.Auto_Tag__online and results and results[-1].online_results:
             self.output(
                 f"\nFiles tagged with metadata provided by {self.current_talker().name} {self.current_talker().website}",
             )
@@ -130,9 +132,9 @@ class CLI:
     def fetch_metadata(self, issue_id: str) -> GenericMetadata:
         # now get the particular issue data
         try:
-            ct_md = self.current_talker().fetch_comic_data(issue_id)
-        except TalkerError as e:
-            logger.exception(f"Error retrieving issue details. Save aborted.\n{e}")
+            ct_md = self.current_talker().fetch_comic_data(issue_id=issue_id, on_rate_limit=None)
+        except Exception as e:
+            logger.error("Error retrieving issue details '%s'. Save aborted.", e)
             return GenericMetadata()
 
         if self.config.Metadata_Options__apply_transform_on_import:
@@ -184,7 +186,7 @@ class CLI:
             if i != "s":
                 # save the data!
                 # we know at this point, that the file is all good to go
-                ca = ComicArchive(match_set.original_path)
+                ca = ComicArchive(match_set.original_path, hash_archive=self.config.Runtime_Options__preferred_hash)
                 md, match_set.tags_read = self.create_local_metadata(ca, self.config.Runtime_Options__tags_read)
                 ct_md = self.fetch_metadata(match_set.online_results[int(i) - 1].issue_id)
 
@@ -200,22 +202,22 @@ class CLI:
 
         # now go through the match results
         if self.config.Runtime_Options__summary:
-            if len(match_results.good_matches) > 0:
+            if match_results.good_matches:
                 print_header("Successful matches:")
                 for f in match_results.good_matches:
                     self.output(f, force_output=True)
 
-            if len(match_results.no_matches) > 0:
+            if match_results.no_matches:
                 print_header("No matches:")
                 for f in match_results.no_matches:
                     self.output(f, force_output=True)
 
-            if len(match_results.write_failures) > 0:
+            if match_results.write_failures:
                 print_header("File Write Failures:")
                 for f in match_results.write_failures:
                     self.output(f, force_output=True)
 
-            if len(match_results.fetch_data_failures) > 0:
+            if match_results.fetch_data_failures:
                 print_header("Network Data Fetch Failures:")
                 for f in match_results.fetch_data_failures:
                     self.output(f, force_output=True)
@@ -224,12 +226,12 @@ class CLI:
             # just quit if we're not interactive or showing the summary
             return
 
-        if len(match_results.multiple_matches) > 0:
+        if match_results.multiple_matches:
             self.output("\nArchives with multiple high-confidence matches:\n------------------", force_output=True)
             for match_set in match_results.multiple_matches:
                 self.display_match_set_for_choice("Multiple high-confidence matches", match_set)
 
-        if len(match_results.low_confidence_matches) > 0:
+        if match_results.low_confidence_matches:
             self.output("\nArchives with low-confidence matches:\n------------------", force_output=True)
             for match_set in match_results.low_confidence_matches:
                 if len(match_set.online_results) == 1:
@@ -317,6 +319,7 @@ class CLI:
             return Result(Action.print, Status.success, ca.path)
 
         self.output()
+        tags_read = []
 
         for tag_id, tag in tags.items():
             if not self.config.Runtime_Options__tags_read or tag_id in self.config.Runtime_Options__tags_read:
@@ -328,9 +331,22 @@ class CLI:
                         else:
                             md = ca.read_tags(tag_id)
                             self.output(md)
+                        tags_read.append(tag_id)
                     except Exception as e:
                         logger.error("Failed to read tags from %s: %s", ca.path, e)
-        return Result(Action.print, Status.success, ca.path, md=md)
+        if not self.config.Auto_Tag__metadata.is_empty and not self.config.Runtime_Options__raw:
+            try:
+                md, tags_read = self.create_local_metadata(
+                    ca, self.config.Runtime_Options__tags_read or list(tags.keys())
+                )
+                tags_read_names = ", ".join(["CLI"] + [tags[t].name() for t in tags_read])
+                self.output(f"--------- Combined {tags_read_names} tags ---------")
+                self.output(md)
+                tags_read = list(tags.keys())
+            except Exception as e:
+                logger.error("Failed to read tags from %s: %s", ca.path, e)
+
+        return Result(Action.print, Status.success, ca.path, md=md, tags_read=tags_read)
 
     def delete_tags(self, ca: ComicArchive, tag_id: str) -> Status:
         tag_name = tags[tag_id].name()
@@ -427,7 +443,6 @@ class CLI:
             ct_md = qt.id_comic(
                 ca,
                 md,
-                self.config.Quick_Tag__simple,
                 set(self.config.Quick_Tag__hash),
                 self.config.Quick_Tag__exact_only,
                 self.config.Runtime_Options__interactive,
@@ -437,126 +452,10 @@ class CLI:
             if ct_md is None:
                 ct_md = GenericMetadata()
             return ct_md
-        except Exception:
-            logger.exception("Quick Tagging failed")
+        except Exception as e:
+            logger.exception("Quick Tagging failed: %s", e)
+            logger.debug("", exc_info=True)
         return None
-
-    def normal_tag(
-        self, ca: ComicArchive, tags_read: list[str], md: GenericMetadata, match_results: OnlineMatchResults
-    ) -> tuple[GenericMetadata, list[IssueResult], Result | None, OnlineMatchResults]:
-        # ct_md, results, matches, match_results
-        if md is None or md.is_empty:
-            logger.error("No metadata given to search online with!")
-            res = Result(
-                Action.save,
-                status=Status.match_failure,
-                original_path=ca.path,
-                match_status=MatchStatus.no_match,
-                tags_written=self.config.Runtime_Options__tags_write,
-                tags_read=tags_read,
-            )
-            match_results.no_matches.append(res)
-            return GenericMetadata(), [], res, match_results
-
-        ii = IssueIdentifier(ca, self.config, self.current_talker())
-
-        ii.set_output_function(functools.partial(self.output, already_logged=True))
-        if not self.config.Auto_Tag__use_year_when_identifying:
-            md.year = None
-        if self.config.Auto_Tag__ignore_leading_numbers_in_filename and md.series is not None:
-            md.series = re.sub(r"^([\d.]+)(.*)", r"\2", md.series)
-        result, matches = ii.identify(ca, md)
-
-        found_match = False
-        choices = False
-        low_confidence = False
-
-        if result == IssueIdentifier.result_no_matches:
-            pass
-        elif result == IssueIdentifier.result_found_match_but_bad_cover_score:
-            low_confidence = True
-            found_match = True
-        elif result == IssueIdentifier.result_found_match_but_not_first_page:
-            found_match = True
-        elif result == IssueIdentifier.result_multiple_matches_with_bad_image_scores:
-            low_confidence = True
-            choices = True
-        elif result == IssueIdentifier.result_one_good_match:
-            found_match = True
-        elif result == IssueIdentifier.result_multiple_good_matches:
-            choices = True
-
-        if choices:
-            if low_confidence:
-                logger.error("Online search: Multiple low confidence matches. Save aborted")
-                res = Result(
-                    Action.save,
-                    status=Status.match_failure,
-                    original_path=ca.path,
-                    online_results=matches,
-                    match_status=MatchStatus.low_confidence_match,
-                    tags_written=self.config.Runtime_Options__tags_write,
-                    tags_read=tags_read,
-                )
-                match_results.low_confidence_matches.append(res)
-                return GenericMetadata(), matches, res, match_results
-
-            logger.error("Online search: Multiple good matches. Save aborted")
-            res = Result(
-                Action.save,
-                status=Status.match_failure,
-                original_path=ca.path,
-                online_results=matches,
-                match_status=MatchStatus.multiple_match,
-                tags_written=self.config.Runtime_Options__tags_write,
-                tags_read=tags_read,
-            )
-            match_results.multiple_matches.append(res)
-            return GenericMetadata(), matches, res, match_results
-        if low_confidence and self.config.Runtime_Options__abort_on_low_confidence:
-            logger.error("Online search: Low confidence match. Save aborted")
-            res = Result(
-                Action.save,
-                status=Status.match_failure,
-                original_path=ca.path,
-                online_results=matches,
-                match_status=MatchStatus.low_confidence_match,
-                tags_written=self.config.Runtime_Options__tags_write,
-                tags_read=tags_read,
-            )
-            match_results.low_confidence_matches.append(res)
-            return GenericMetadata(), matches, res, match_results
-        if not found_match:
-            logger.error("Online search: No match found. Save aborted")
-            res = Result(
-                Action.save,
-                status=Status.match_failure,
-                original_path=ca.path,
-                online_results=matches,
-                match_status=MatchStatus.no_match,
-                tags_written=self.config.Runtime_Options__tags_write,
-                tags_read=tags_read,
-            )
-            match_results.no_matches.append(res)
-            return GenericMetadata(), matches, res, match_results
-
-        # we got here, so we have a single match
-
-        # now get the particular issue data
-        ct_md = self.fetch_metadata(matches[0].issue_id)
-        if ct_md.is_empty:
-            res = Result(
-                Action.save,
-                status=Status.fetch_data_failure,
-                original_path=ca.path,
-                online_results=matches,
-                match_status=MatchStatus.good_match,
-                tags_written=self.config.Runtime_Options__tags_write,
-                tags_read=tags_read,
-            )
-            match_results.fetch_data_failures.append(res)
-            return GenericMetadata(), matches, res, match_results
-        return ct_md, matches, None, match_results
 
     def save(self, ca: ComicArchive, match_results: OnlineMatchResults) -> tuple[Result, OnlineMatchResults]:
         if self.config.Runtime_Options__skip_existing_tags:
@@ -568,7 +467,6 @@ class CLI:
                             Action.save,
                             original_path=ca.path,
                             status=Status.existing_tags,
-                            tags_written=self.config.Runtime_Options__tags_write,
                         ),
                         match_results,
                     )
@@ -577,26 +475,31 @@ class CLI:
             self.output(f"Processing {utils.path_to_short_str(ca.path)}...")
 
         md, tags_read = self.create_local_metadata(ca, self.config.Runtime_Options__tags_read)
-        if md.issue is None or md.issue == "":
-            if self.config.Auto_Tag__assume_issue_one:
-                md.issue = "1"
 
-        matches: list[IssueResult] = []
+        # matches: list[IssueResult] = []
         # now, search online
 
         ct_md = GenericMetadata()
+        res = Result(
+            Action.save,
+            status=Status.success,
+            original_path=ca.path,
+            md=prepare_metadata(md, ct_md, self.config),
+            tags_read=tags_read,
+        )
         if self.config.Auto_Tag__online:
             if self.config.Auto_Tag__issue_id is not None:
                 # we were given the actual issue ID to search with
                 try:
-                    ct_md = self.current_talker().fetch_comic_data(self.config.Auto_Tag__issue_id)
+                    ct_md = self.current_talker().fetch_comic_data(
+                        issue_id=self.config.Auto_Tag__issue_id, on_rate_limit=None
+                    )
                 except TalkerError as e:
-                    logger.exception(f"Error retrieving issue details. Save aborted.\n{e}")
+                    logger.error("Error retrieving issue details. Save aborted. %s", e)
                     res = Result(
                         Action.save,
                         original_path=ca.path,
                         status=Status.fetch_data_failure,
-                        tags_written=self.config.Runtime_Options__tags_write,
                         tags_read=tags_read,
                     )
                     match_results.fetch_data_failures.append(res)
@@ -609,53 +512,46 @@ class CLI:
                         status=Status.match_failure,
                         original_path=ca.path,
                         match_status=MatchStatus.no_match,
-                        tags_written=self.config.Runtime_Options__tags_write,
                         tags_read=tags_read,
                     )
                     match_results.no_matches.append(res)
                     return res, match_results
+                res = Result(
+                    Action.save,
+                    status=Status.success,
+                    original_path=ca.path,
+                    match_status=MatchStatus.good_match,
+                    md=prepare_metadata(md, ct_md, self.config),
+                    tags_read=tags_read,
+                )
 
             else:
-                qt_md = self.try_quick_tag(ca, md)
+                query_md = md.copy()
+                qt_md = self.try_quick_tag(ca, query_md)
+                if query_md.issue is None or query_md.issue == "":
+                    if self.config.Auto_Tag__assume_issue_one:
+                        query_md.issue = "1"
                 if qt_md is None or qt_md.is_empty:
                     if qt_md is not None:
                         self.output("Failed to find match via quick tag")
-                    ct_md, matches, res, match_results = self.normal_tag(ca, tags_read, md, match_results)  # type: ignore[assignment]
-                    if res is not None:
+                    res, match_results = identify_comic(
+                        ca,
+                        md,
+                        tags_read,
+                        match_results,
+                        self.config,
+                        self.current_talker(),
+                        partial(self.output, already_logged=True),
+                        on_rate_limit=None,
+                    )
+
+                    if res.status != Status.success:
                         return res, match_results
                 else:
                     self.output("Successfully matched via quick tag")
-                    ct_md = qt_md
-                    matches = [
-                        IssueResult(
-                            series=ct_md.series or "",
-                            distance=-1,
-                            issue_number=ct_md.issue or "",
-                            issue_count=ct_md.issue_count,
-                            url_image_hash=-1,
-                            issue_title=ct_md.title or "",
-                            issue_id=ct_md.issue_id or "",
-                            series_id=ct_md.issue_id or "",
-                            month=ct_md.month,
-                            year=ct_md.year,
-                            publisher=None,
-                            image_url=ct_md._cover_image or "",
-                            alt_image_urls=[],
-                            description=ct_md.description or "",
-                        )
-                    ]
-
-        res = Result(
-            Action.save,
-            status=Status.success,
-            original_path=ca.path,
-            online_results=matches,
-            match_status=MatchStatus.good_match,
-            md=prepare_metadata(md, ct_md, self.config),
-            tags_written=self.config.Runtime_Options__tags_write,
-            tags_read=tags_read,
-        )
         assert res.md
+
+        res.tags_written = self.config.Runtime_Options__tags_write
         # ok, done building our metadata. time to save
         if self.write_tags(ca, res.md):
             match_results.good_matches.append(res)
@@ -673,7 +569,7 @@ class CLI:
         md, tags_read = self.create_local_metadata(ca, self.config.Runtime_Options__tags_read)
 
         if md.series is None:
-            logger.error(msg_hdr + "Can't rename without series name")
+            logger.error("%sCan't rename without series name", msg_hdr)
             return Result(Action.rename, Status.read_failure, original_path)
 
         new_ext = ""  # default
@@ -696,13 +592,13 @@ class CLI:
             new_name = renamer.determine_name(ext=new_ext)
         except ValueError:
             logger.exception(
-                msg_hdr
-                + "Invalid format string!\n"
+                "%sInvalid format string!\n"
                 + "Your rename template is invalid!\n\n"
                 + "%s\n\n"
                 + "Please consult the template help in the settings "
                 + "and the documentation on the format at "
                 + "https://docs.python.org/3/library/string.html#format-string-syntax",
+                msg_hdr,
                 self.config.File_Rename__template,
             )
             return Result(Action.rename, Status.rename_failure, original_path, md=md)
@@ -738,14 +634,14 @@ class CLI:
             msg_hdr = f"{ca.path}: "
 
         if ca.is_zip():
-            logger.error(msg_hdr + "Archive is already a zip file.")
+            logger.error("%sArchive is already a zip file.", msg_hdr)
             return Result(Action.export, Status.success, ca.path)
 
         filename_path = ca.path
         new_file = filename_path.with_suffix(".cbz")
 
         if self.config.Runtime_Options__abort_on_conflict and new_file.exists():
-            self.output(msg_hdr + f"{new_file.name} already exists in the that folder.")
+            self.output("%s%s already exists in the that folder.", msg_hdr, new_file.name)
             return Result(Action.export, Status.write_failure, ca.path)
 
         new_file = utils.unique_file(new_file)
@@ -760,7 +656,7 @@ class CLI:
                         filename_path.unlink(missing_ok=True)
                         delete_success = True
                     except OSError:
-                        logger.exception(msg_hdr + "Error deleting original archive after export")
+                        logger.exception("%sError deleting original archive after export", msg_hdr)
             else:
                 # last export failed, so remove the zip, if it exists
                 new_file.unlink(missing_ok=True)
@@ -790,7 +686,9 @@ class CLI:
             logger.error("Cannot find %s", filename)
             return Result(command, Status.read_failure, pathlib.Path(filename)), match_results
 
-        ca = ComicArchive(filename, str(graphics_path / "nocover.png"))
+        ca = ComicArchive(
+            filename, str(graphics_path / "nocover.png"), hash_archive=self.config.Runtime_Options__preferred_hash
+        )
 
         if not ca.seems_to_be_a_comic_archive():
             logger.error("Sorry, but %s is not a comic archive!", filename)

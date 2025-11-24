@@ -1,4 +1,4 @@
-"""A PyQt5 widget to display cover images
+"""A PyQt6 widget to display cover images
 
 Display cover images from either a local archive, or from comic source metadata.
 TODO: This should be re-factored using subclasses!
@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 import pathlib
 
-from PyQt5 import QtCore, QtGui, QtWidgets, uic
+from PyQt6 import QtCore, QtGui, QtWidgets, uic
 
 from comicapi.comicarchive import ComicArchive
 from comictaggerlib.imagefetcher import ImageFetcher
@@ -56,7 +56,7 @@ def clickable(widget: QtWidgets.QWidget) -> QtCore.pyqtBoundSignal:
 class CoverImageWidget(QtWidgets.QWidget):
     ArchiveMode = 0
     AltCoverMode = 1
-    URLMode = 1
+    URLMode = 2
     DataMode = 3
 
     image_fetch_complete = QtCore.pyqtSignal(str, QtCore.QByteArray)
@@ -76,6 +76,7 @@ class CoverImageWidget(QtWidgets.QWidget):
             self.talker = None
         else:
             self.cover_fetcher = ImageFetcher(cache_folder)
+            self.cover_fetcher.image_fetch_complete = self.image_fetch_complete.emit
             self.talker = None
         with (ui_path / "coverimagewidget.ui").open(encoding="utf-8") as uifile:
             uic.loadUi(uifile, self)
@@ -234,8 +235,9 @@ class CoverImageWidget(QtWidgets.QWidget):
     def load_url(self) -> None:
         assert isinstance(self.cache_folder, pathlib.Path)
         self.load_default()
-        self.cover_fetcher = ImageFetcher(self.cache_folder)
-        ImageFetcher.image_fetch_complete = self.image_fetch_complete.emit
+        if not self.cover_fetcher:
+            self.cover_fetcher = ImageFetcher(self.cache_folder)
+            self.cover_fetcher.image_fetch_complete = self.image_fetch_complete.emit
         data = self.cover_fetcher.fetch(self.url_list[self.imageIndex])
         if data:
             self.cover_remote_fetch_complete(self.url_list[self.imageIndex], data)
@@ -249,12 +251,13 @@ class CoverImageWidget(QtWidgets.QWidget):
         self.set_display_pixmap()
 
     def load_page(self) -> None:
-        if self.comic_archive is not None:
-            if self.page_loader is not None:
-                self.page_loader.abandoned = True
-            self.page_loader = PageLoader(self.comic_archive, self.imageIndex)
-            self.page_loader.loadComplete.connect(self.page_load_complete)
-            self.page_loader.start()
+        if self.comic_archive is None:
+            return
+        if self.page_loader is not None:
+            self.page_loader.abandoned = True
+        self.page_loader = PageLoader(self.comic_archive, self.imageIndex)
+        self.page_loader.loadComplete.connect(self.page_load_complete)
+        self.page_loader.start()
 
     def page_load_complete(self, image_data: bytes) -> None:
         img = get_qimage_from_data(image_data)

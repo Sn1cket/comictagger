@@ -18,17 +18,15 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Callable
 
-from PyQt5 import QtCore, QtGui, QtWidgets, uic
+from PyQt6 import QtCore, QtGui, QtWidgets, uic
 
 from comicapi.comicarchive import ComicArchive, tags
-from comicapi.genericmetadata import GenericMetadata
 from comictaggerlib.coverimagewidget import CoverImageWidget
 from comictaggerlib.ctsettings import ct_ns
 from comictaggerlib.md import prepare_metadata
 from comictaggerlib.resulttypes import IssueResult, Result
-from comictaggerlib.ui import ui_path
+from comictaggerlib.ui import qtutils, ui_path
 from comictalker.comictalker import ComicTalker, TalkerError
 
 logger = logging.getLogger(__name__)
@@ -38,9 +36,8 @@ class AutoTagMatchWindow(QtWidgets.QDialog):
     def __init__(
         self,
         parent: QtWidgets.QWidget,
-        match_set_list: list[Result],
+        match_set_list: list[tuple[Result, ComicArchive]],
         read_tags: list[str],
-        fetch_func: Callable[[IssueResult], GenericMetadata],
         config: ct_ns,
         talker: ComicTalker,
     ) -> None:
@@ -51,7 +48,7 @@ class AutoTagMatchWindow(QtWidgets.QDialog):
 
         self.config = config
 
-        self.current_match_set: Result = match_set_list[0]
+        self.current_match_set: tuple[Result, ComicArchive] = match_set_list[0]
 
         self.altCoverWidget = CoverImageWidget(
             self.altCoverContainer, CoverImageWidget.AltCoverMode, config.Runtime_Options__config.user_cache_dir
@@ -79,7 +76,7 @@ class AutoTagMatchWindow(QtWidgets.QDialog):
 
         self.match_set_list = match_set_list
         self._tags = read_tags
-        self.fetch_func = fetch_func
+        self.talker = talker
 
         self.current_match_set_idx = 0
 
@@ -93,7 +90,6 @@ class AutoTagMatchWindow(QtWidgets.QDialog):
         self.current_match_set = self.match_set_list[self.current_match_set_idx]
 
         if self.current_match_set_idx + 1 == len(self.match_set_list):
-            self.buttonBox.button(QtWidgets.QDialogButtonBox.StandardButton.Cancel).setDisabled(True)
             self.skipButton.setText("Skip")
 
         self.set_cover_image()
@@ -101,7 +97,7 @@ class AutoTagMatchWindow(QtWidgets.QDialog):
         self.twList.resizeColumnsToContents()
         self.twList.selectRow(0)
 
-        path = self.current_match_set.original_path
+        path = self.current_match_set[0].original_path
         self.setWindowTitle(
             "Select correct match or skip ({} of {}): {}".format(
                 self.current_match_set_idx + 1,
@@ -118,7 +114,7 @@ class AutoTagMatchWindow(QtWidgets.QDialog):
 
         self.twList.setSortingEnabled(False)
 
-        for row, match in enumerate(self.current_match_set.online_results):
+        for row, match in enumerate(self.current_match_set[0].online_results):
             self.twList.insertRow(row)
 
             item_text = match.series
@@ -182,8 +178,7 @@ class AutoTagMatchWindow(QtWidgets.QDialog):
             self.teDescription.setText(match.description)
 
     def set_cover_image(self) -> None:
-        ca = ComicArchive(self.current_match_set.original_path)
-        self.archiveCoverWidget.set_archive(ca)
+        self.archiveCoverWidget.set_archive(self.current_match_set[1])
 
     def current_match(self) -> IssueResult:
         row = self.twList.currentRow()
@@ -210,32 +205,30 @@ class AutoTagMatchWindow(QtWidgets.QDialog):
             self.update_data()
 
     def reject(self) -> None:
-        reply = QtWidgets.QMessageBox.question(
-            self,
-            "Cancel Matching",
-            "Are you sure you wish to cancel the matching process?",
-            QtWidgets.QMessageBox.StandardButton.Yes,
-            QtWidgets.QMessageBox.StandardButton.No,
-        )
+        qmsg = QtWidgets.QMessageBox(self)
+        qmsg.setIcon(qmsg.Icon.Question)
+        qmsg.setText("Cancel Matching")
+        qmsg.setInformativeText("Are you sure you wish to cancel the matching process?")
+        qmsg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No)
+        qmsg.accepted.connect(self._cancel)
+        qmsg.show()
 
-        if reply == QtWidgets.QMessageBox.StandardButton.No:
-            return
-
+    def _cancel(self) -> None:
         QtWidgets.QDialog.reject(self)
 
     def save_match(self) -> None:
         match = self.current_match()
-        ca = ComicArchive(self.current_match_set.original_path)
-        md, error = self.parent().read_selected_tags(self._tags, ca)
+        ca = self.current_match_set[1]
+        md, _, error = self.parent().read_selected_tags(self._tags, ca)
         if error is not None:
             logger.error("Failed to load tags for %s: %s", ca.path, error)
+
             QtWidgets.QApplication.restoreOverrideCursor()
-            QtWidgets.QMessageBox.critical(
+            return qtutils.critical(
                 self,
                 "Read Failed!",
                 f"One or more of the read tags failed to load for {ca.path}, check log for details",
             )
-            return
 
         if md.is_empty:
             md = ca.metadata_from_filename(
@@ -248,15 +241,14 @@ class AutoTagMatchWindow(QtWidgets.QDialog):
         # now get the particular issue data
 
         try:
-            self.current_match_set.md = ct_md = self.fetch_func(match)
+            self.current_match_set[0].md = ct_md = self.talker.fetch_comic_data(issue_id=match.issue_id)
         except TalkerError as e:
             QtWidgets.QApplication.restoreOverrideCursor()
-            QtWidgets.QMessageBox.critical(self, f"{e.source} {e.code_name} Error", f"{e}")
+            qtutils.critical(self, f"{e.source} {e.code_name} Error", str(e))
             return
 
         if ct_md is None or ct_md.is_empty:
-            QtWidgets.QMessageBox.critical(self, "Network Issue", "Could not retrieve issue details!")
-            return
+            return qtutils.critical(self, "Network Issue", "Could not retrieve issue details!")
 
         QtWidgets.QApplication.setOverrideCursor(QtGui.QCursor(QtCore.Qt.CursorShape.WaitCursor))
         md = prepare_metadata(md, ct_md, self.config)
@@ -264,7 +256,7 @@ class AutoTagMatchWindow(QtWidgets.QDialog):
             success = ca.write_tags(md, tag_id)
             QtWidgets.QApplication.restoreOverrideCursor()
             if not success:
-                QtWidgets.QMessageBox.warning(
+                qtutils.warning(
                     self,
                     "Write Error",
                     f"Saving {tags[tag_id].name()} the tags to the archive seemed to fail!",

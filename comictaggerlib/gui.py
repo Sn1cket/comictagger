@@ -10,28 +10,30 @@ import types
 import settngs
 
 from comictaggerlib.ctsettings import ct_ns
+from comictaggerlib.ctversion import version
 from comictaggerlib.graphics import graphics_path
 from comictalker.comictalker import ComicTalker
 
 logger = logging.getLogger("comictagger")
 try:
     qt_available = True
-    from PyQt5 import QtCore, QtGui, QtWidgets
+    from PyQt6 import QtCore, QtGui, QtWidgets
 
-    def show_exception_box(log_msg: str) -> None:
+    def show_exception_box(log_msg: str, details: str) -> None:
         """Checks if a QApplication instance is available and shows a messagebox with the exception message.
         If unavailable (non-console application), log an additional notice.
         """
         if QtWidgets.QApplication.instance() is not None:
-            errorbox = QtWidgets.QMessageBox()
+            errorbox = QtWidgets.QMessageBox(QtWidgets.QApplication.activeWindow())
             errorbox.setStandardButtons(
                 QtWidgets.QMessageBox.StandardButton.Abort | QtWidgets.QMessageBox.StandardButton.Ignore
             )
+            errorbox.setTextFormat(QtCore.Qt.TextFormat.MarkdownText)
             errorbox.setText(log_msg)
-            if errorbox.exec() == QtWidgets.QMessageBox.StandardButton.Abort:
-                QtWidgets.QApplication.exit(1)
-            else:
-                logger.warning("Exception ignored")
+            errorbox.setDetailedText(details + " ")  # Forces text formatting on macOS
+            errorbox.rejected.connect(lambda: QtWidgets.QApplication.exit(1))
+            errorbox.accepted.connect(lambda: logger.warning("Exception ignored"))
+            errorbox.show()
         else:
             logger.debug("No QApplication instance available.")
 
@@ -59,18 +61,18 @@ try:
             else:
                 exc_info = (exc_type, exc_value, exc_traceback)
                 trace_back = "".join(traceback.format_tb(exc_traceback))
-                log_msg = f"{exc_type.__name__}: {exc_value}\n\n{trace_back}"
                 logger.critical("Uncaught exception: %s: %s", exc_type.__name__, exc_value, exc_info=exc_info)
+                log_msg = f"{exc_type.__name__}: {exc_value}"
 
                 # trigger message box show
-                self._exception_caught.emit(f"Oops. An unexpected error occurred:\n{log_msg}")
+                self._exception_caught.emit(f"Oops. An unexpected error occurred:\n{log_msg}", trace_back)
 
     qt_exception_hook = UncaughtHook()
     from comictaggerlib.taggerwindow import TaggerWindow
 
     try:
         # needed here to initialize QWebEngine
-        from PyQt5.QtWebEngineWidgets import QWebEngineView  # noqa: F401
+        from PyQt6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 
         qt_webengine_available = True
     except ImportError:
@@ -81,15 +83,15 @@ try:
 
         # Handles "Open With" from Finder on macOS
         def event(self, event: QtCore.QEvent) -> bool:
-            if event.type() == QtCore.QEvent.FileOpen:
-                logger.info(event.url().toLocalFile())
+            if event.type() == QtCore.QEvent.Type.FileOpen:
+                logger.info("file open recieved: %s", event.url().toLocalFile())
                 self.openFileRequest.emit(event.url())
                 return True
             return super().event(event)
 
 except ImportError as e:
 
-    def show_exception_box(log_msg: str) -> None: ...
+    def show_exception_box(log_msg: str, details: str) -> None: ...
 
     logger.exception("Qt unavailable")
     qt_available = False
@@ -105,7 +107,7 @@ def open_tagger_window(
         args.extend(["-platform", "windows:darkmode=2"])
     app = Application(args)
     if error is not None:
-        show_exception_box(error[0])
+        show_exception_box(error[0], " ")
         if error[1]:
             raise SystemExit(1)
 
@@ -113,6 +115,9 @@ def open_tagger_window(
     app.openFileRequest.connect(lambda x: config[0].Runtime_Options__files.append(x.toLocalFile()))
     # The window Icon needs to be set here. It's also set in taggerwindow.ui but it doesn't seem to matter
     app.setWindowIcon(QtGui.QIcon(":/graphics/app.png"))
+    app.setApplicationName("ComicTagger")
+    app.setApplicationDisplayName("ComicTagger")
+    app.setApplicationVersion(version)
 
     if platform.system() == "Windows":
         # For pure python, tell windows that we're not python,
@@ -128,7 +133,8 @@ def open_tagger_window(
             ctypes.windll.user32.SetWindowPos(console_wnd, None, 0, 0, 0, 0, swp_hidewindow)  # type: ignore[attr-defined]
 
     if platform.system() != "Linux":
-        img = QtGui.QPixmap(str(graphics_path / "tags.png"))
+        img = QtGui.QPixmap()
+        img.loadFromData((graphics_path / "tags.png").read_bytes())
 
         splash = QtWidgets.QSplashScreen(img)
         splash.show()

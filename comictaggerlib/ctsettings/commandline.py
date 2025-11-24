@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import os
 import platform
@@ -25,7 +26,7 @@ import subprocess
 
 import settngs
 
-from comicapi import utils
+from comicapi import comicarchive, utils
 from comicapi.comicarchive import tags
 from comictaggerlib import ctversion, quick_tag
 from comictaggerlib.ctsettings.settngs_namespace import SettngsNS as ct_ns
@@ -83,6 +84,20 @@ def register_runtime(parser: settngs.Manager) -> None:
         help='Enable the expiremental "quick tagger"',
         file=False,
     )
+    parser.add_setting(
+        "--enable-embedding-hashes",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable embedding hashes in metadata (currently only CR/CIX has support)",
+        file=False,
+    )
+    parser.add_setting(
+        "--preferred-hash",
+        default="shake_256",
+        choices=hashlib.algorithms_available,
+        help="The type of embedded hash to save when --enable-embedding-hashes is set\n\n",
+        file=False,
+    )
     parser.add_setting("-q", "--quiet", action="store_true", help="Don't say much (for print mode).", file=False)
     parser.add_setting(
         "-j",
@@ -127,10 +142,10 @@ def register_runtime(parser: settngs.Manager) -> None:
         file=False,
     )
     parser.add_setting(
-        "-R",
-        "--recursive",
+        "--directory",
+        "--no-recursive",
         action="store_true",
-        help="Recursively include files in sub-folders.",
+        help="Disable reading comics recursively (the default), opens any directories/folders given as an individual comic.",
         file=False,
     )
     parser.add_setting("-g", "--glob", action="store_true", help="Windows only. Enable globbing", file=False)
@@ -268,6 +283,15 @@ def validate_commandline_settings(config: settngs.Config[ct_ns], parser: settngs
             + "Distributed under Apache License 2.0 (http://www.apache.org/licenses/LICENSE-2.0)\n",
         )
 
+    enabled_tags = {tag for tag in comicarchive.tags if comicarchive.tags[tag].enabled}
+    if (
+        (not config[0].Metadata_Options__cr)
+        and "cr" in comicarchive.tags
+        and comicarchive.tags["cr"].enabled
+        and len(enabled_tags) > 1
+    ):
+        comicarchive.tags["cr"].enabled = False
+
     config[0].Runtime_Options__no_gui = any(
         (config[0].Commands__command != Action.gui, config[0].Runtime_Options__no_gui, config[0].Commands__copy)
     )
@@ -287,6 +311,28 @@ def validate_commandline_settings(config: settngs.Config[ct_ns], parser: settngs
     if config[0].Runtime_Options__tags_read and not config[0].Runtime_Options__tags_write:
         config[0].Runtime_Options__tags_write = config[0].Runtime_Options__tags_read
 
+    disabled_tags = {tag for tag in comicarchive.tags if not comicarchive.tags[tag].enabled}
+    to_be_removed = (
+        set(config[0].Runtime_Options__tags_read)
+        .union(config[0].Runtime_Options__tags_write)
+        .intersection(disabled_tags)
+    )
+    if to_be_removed:
+        logger.debug("Removing disabled tags: %s", to_be_removed)
+        config[0].Runtime_Options__tags_read = [
+            tag for tag in config[0].Runtime_Options__tags_read if tag not in to_be_removed
+        ]
+        config[0].Runtime_Options__tags_write = [
+            tag for tag in config[0].Runtime_Options__tags_write if tag not in to_be_removed
+        ]
+
+    if (
+        config[0].Runtime_Options__no_gui
+        and not [tag.id for tag in tags.values() if tag.enabled]
+        and config[0].Commands__command != Action.list_plugins
+    ):
+        parser.exit(status=1, message="There are no tags enabled see --list-plugins\n")
+
     if config[0].Runtime_Options__no_gui and not config[0].Runtime_Options__files:
         if config[0].Commands__command == Action.print and not config[0].Auto_Tag__metadata.is_empty:
             ...  # allow printing the metadata provided on the commandline
@@ -304,14 +350,21 @@ def validate_commandline_settings(config: settngs.Config[ct_ns], parser: settngs
         if not config[0].Runtime_Options__tags_write:
             parser.exit(message="Please specify the tags to copy to with --tags-write\n", status=1)
 
-    if config[0].Runtime_Options__recursive:
-        config[0].Runtime_Options__files = utils.get_recursive_filelist(config[0].Runtime_Options__files)
+    if not config[0].Runtime_Options__directory:
+        config[0].Runtime_Options__files = utils.os_sorted(
+            set(utils.get_recursive_filelist(config[0].Runtime_Options__files))
+        )
+    else:
+        config[0].Runtime_Options__files = utils.os_sorted(config[0].Runtime_Options__files)
+
+    if not config[0].Runtime_Options__enable_embedding_hashes:
+        config[0].Runtime_Options__preferred_hash = ""
 
     # take a crack at finding rar exe if it's not in the path
     if not utils.which("rar"):
         if platform.system() == "Windows":
             letters = ["C"]
-            letters.extend({f"{d}" for d in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(f"{d}:\\")} - {"C"})
+            letters.extend({f"{d}" for d in "ABDEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(f"{d}:\\")})
             for letter in letters:
                 # look in some likely places for Windows machines
                 utils.add_to_path(rf"{letter}:\Program Files\WinRAR")

@@ -43,7 +43,7 @@ def cleanup_html(string: str | None, remove_html_tables: bool = False) -> str:
 
     # find any tables
     soup = BeautifulSoup(string, "html.parser")
-    tables = soup.findAll("table")
+    tables = soup.find_all("table")
 
     # put in our own
     string = re.sub(r"<br>|</li>", "\n", string, flags=re.IGNORECASE)
@@ -78,15 +78,15 @@ def cleanup_html(string: str | None, remove_html_tables: bool = False) -> str:
                 rows = []
                 hdrs = []
                 col_widths = []
-                for hdr in table.findAll("th"):
+                for hdr in table.find_all("th"):
                     item = hdr.string.strip()
                     hdrs.append(item)
                     col_widths.append(len(item))
                 rows.append(hdrs)
 
-                for row in table.findAll("tr"):
+                for row in table.find_all("tr"):
                     cols = []
-                    col = row.findAll("td")
+                    col = row.find_all("td")
 
                     for i, c in enumerate(col):
                         item = c.string.strip()
@@ -94,7 +94,7 @@ def cleanup_html(string: str | None, remove_html_tables: bool = False) -> str:
                         if len(item) > col_widths[i]:
                             col_widths[i] = len(item)
 
-                    if len(cols) != 0:
+                    if cols:
                         rows.append(cols)
                 # now we have the data, make it into text
                 fmtstr = "|"

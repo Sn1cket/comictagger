@@ -46,8 +46,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        python-version: [3.9]
-        os: [ubuntu-22.04, macos-13, windows-latest]
+        python-version: [3.9, 3.13]
+        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-13, macos-14, windows-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -70,11 +70,12 @@ jobs:
 
       - name: Install linux dependencies
         run: |
-          sudo apt-get update && sudo apt-get upgrade && sudo apt-get install pkg-config libicu-dev libqt5gui5 libfuse2 desktop-file-utils
+          sudo apt-get update && sudo apt-get upgrade && sudo apt-get install pkg-config libicu-dev libqt6gui6 libfuse2 desktop-file-utils
         if: runner.os == 'Linux'
 
       - name: Build and install PyPi packages
         run: |
+          export TOX_OVERRIDE='testenv.install_command=python -I -m pip install --only-binary PyQt6 --only-binary PyQt6-WebEngine {opts} {packages}'
           export PKG_CONFIG_PATH="/usr/local/opt/icu4c/lib/pkgconfig:/opt/homebrew/opt/icu4c/lib/pkgconfig${PKG_CONFIG_PATH+:$PKG_CONFIG_PATH}";
           export PATH="/usr/local/opt/icu4c/bin:/usr/local/opt/icu4c/sbin${PATH+:$PATH}"
           python -m tox r -m build
@@ -83,14 +84,17 @@ jobs:
       - name: Archive production artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: "${{ format('ComicTagger-{0}', runner.os) }}"
+          name: "${{ format('ComicTagger-{0}', matrix.os) }}"
           path: |
             dist/*.whl
             dist/binary/*.zip
             dist/binary/*.tar.gz
             dist/binary/*.dmg
             dist/binary/*.AppImage
+        if: matrix.python-version == 3.13
 
       - name: PyTest
         run: |
-          python -m tox r
+          export TOX_OVERRIDE='testenv.install_command=python -I -m pip install --only-binary PyQt6 --only-binary PyQt6-WebEngine {opts} {packages}'
+          python -m tox p
+        shell: bash

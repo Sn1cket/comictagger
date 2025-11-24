@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import hashlib
 import logging
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Union, overload
@@ -43,7 +44,21 @@ logger = logging.getLogger(__name__)
 REMOVE = object()
 
 
-Credit = merge.Credit
+@dataclasses.dataclass
+class Credit:
+    person: str = ""
+    role: str = ""
+    primary: bool = False
+    language: str = ""  # Should be ISO 639 language code
+
+    def __str__(self) -> str:
+        lang = ""
+        role = ""
+        if self.role:
+            role = f"{self.role}: "
+        if self.language:
+            lang = f" [{self.language}]"
+        return f"{role}{self.person}{lang}"
 
 
 class PageType(merge.StrEnum):
@@ -123,6 +138,7 @@ class ComicSeries:
     publisher: str
     start_year: int | None
     format: str | None
+    web_links: list[Url] = dataclasses.field(default_factory=list)
 
     def copy(self) -> ComicSeries:
         return copy.deepcopy(self)
@@ -134,6 +150,37 @@ class MetadataOrigin(NamedTuple):
 
     def __str__(self) -> str:
         return self.name
+
+
+class ImageHash(NamedTuple):
+    """
+    A valid ImageHash requires at a minimum a Hash and Kind or a URL
+    If only a URL is given, it will be used for cover matching otherwise Hash is used
+    The URL is also required for the GUI to display covers
+    Available Kind's are "ahash" and "phash"
+    """
+
+    Hash: int
+    Kind: str
+    URL: str
+
+
+class FileHash(NamedTuple):
+    name: str
+    hash: str
+
+    def __str__(self) -> str:
+        return self.name + ":" + self.hash
+
+    @classmethod
+    def parse(cls, string: str) -> FileHash:
+        name, _, parsed_hash = string.partition(":")
+        if name in hashlib.algorithms_available:
+            return FileHash(name, parsed_hash)
+        return FileHash("", "")
+
+    def __bool__(self) -> bool:
+        return all(self)
 
 
 @dataclasses.dataclass
@@ -151,6 +198,7 @@ class GenericMetadata:
     data_origin: MetadataOrigin | None = None
     issue_id: str | None = None
     series_id: str | None = None
+    original_hash: FileHash | None = None
 
     series: str | None = None
     series_aliases: set[str] = dataclasses.field(default_factory=set)
@@ -169,6 +217,8 @@ class GenericMetadata:
     alternate_count: int | None = None
     story_arcs: list[str] = dataclasses.field(default_factory=list)
     series_groups: list[str] = dataclasses.field(default_factory=list)
+
+    gtin: str | None = None  # ISBN/EAN identifier
 
     publisher: str | None = None
     imprint: str | None = None
@@ -202,8 +252,8 @@ class GenericMetadata:
     last_mark: str | None = None
 
     # urls to cover image, not generally part of the metadata
-    _cover_image: str | None = None
-    _alternate_images: list[str] = dataclasses.field(default_factory=list)
+    _cover_image: ImageHash | None = None
+    _alternate_images: list[ImageHash] = dataclasses.field(default_factory=list)
 
     def __post_init__(self) -> None:
         for key, value in self.__dict__.items():
@@ -285,6 +335,9 @@ class GenericMetadata:
         self.issue_id = assign(self.issue_id, new_md.issue_id)
         self.series_id = assign(self.series_id, new_md.series_id)
 
+        # This should not usually be set by a talker or other online datasource
+        self.original_hash = assign(self.original_hash, new_md.original_hash)
+
         self.series = assign(self.series, new_md.series)
 
         self.series_aliases = assign_list(self.series_aliases, new_md.series_aliases)
@@ -303,6 +356,8 @@ class GenericMetadata:
         self.alternate_count = assign(self.alternate_count, new_md.alternate_count)
         self.story_arcs = assign_list(self.story_arcs, new_md.story_arcs)
         self.series_groups = assign_list(self.series_groups, new_md.series_groups)
+
+        self.gtin = assign(self.gtin, new_md.gtin)
 
         self.publisher = assign(self.publisher, new_md.publisher)
         self.imprint = assign(self.imprint, new_md.imprint)
@@ -385,7 +440,7 @@ class GenericMetadata:
             if p.type == PageType.FrontCover:
                 coverlist.append(p.archive_index)
 
-        if len(coverlist) == 0:
+        if not coverlist:
             coverlist.append(self.get_archive_page_index(0))
 
         return coverlist
@@ -427,13 +482,12 @@ class GenericMetadata:
         if not found:
             self.credits.append(credit)
 
-    def get_primary_credit(self, role: str) -> str:
-        primary = ""
+    def get_primary_credit(self, role: str) -> Credit | None:
+        primary = None
+        role = role.casefold()
         for credit in self.credits:
-            if (primary == "" and credit.role.casefold() == role.casefold()) or (
-                credit.role.casefold() == role.casefold() and credit.primary
-            ):
-                primary = credit.person
+            if (not primary and credit.role.casefold() == role) or (credit.primary and credit.role.casefold() == role):
+                primary = credit
         return primary
 
     def __str__(self) -> str:
@@ -450,6 +504,7 @@ class GenericMetadata:
 
         add_string("data_origin", self.data_origin)
         add_string("series", self.series)
+        add_string("original_hash", self.original_hash)
         add_string("series_aliases", ",".join(self.series_aliases))
         add_string("issue", self.issue)
         add_string("issue_count", self.issue_count)
@@ -472,6 +527,7 @@ class GenericMetadata:
         add_string("web_links", [str(x) for x in self.web_links])
         add_string("format", self.format)
         add_string("manga", self.manga)
+        add_string("gtin", self.gtin)
 
         add_string("price", self.price)
         add_string("is_version_of", self.is_version_of)
@@ -559,6 +615,7 @@ md_test: GenericMetadata = GenericMetadata(
     alternate_series="Tales",
     alternate_number="2",
     alternate_count=7,
+    gtin=None,
     imprint="craphound.com",
     notes="Tagged with ComicTagger 1.3.2a5 using info from Comic Vine on 2022-04-16 15:52:26. [Issue ID 140529]",
     web_links=[

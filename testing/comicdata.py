@@ -217,8 +217,8 @@ metadata_keys = [
 ]
 
 credits = [
-    (comicapi.genericmetadata.md_test, "writer", "Dara Naraghi"),
-    (comicapi.genericmetadata.md_test, "writeR", "Dara Naraghi"),
+    (comicapi.genericmetadata.md_test, "writer", comicapi.genericmetadata.Credit(person="Dara Naraghi", role="Writer")),
+    (comicapi.genericmetadata.md_test, "writeR", comicapi.genericmetadata.Credit(person="Dara Naraghi", role="Writer")),
     (
         comicapi.genericmetadata.md_test.replace(
             credits=[
@@ -227,7 +227,7 @@ credits = [
             ]
         ),
         "writeR",
-        "Dara Naraghi",
+        comicapi.genericmetadata.Credit(person="Dara Naraghi", role="writer"),  # TODO: normalize casing
     ),
 ]
 
@@ -258,7 +258,7 @@ all_seed_imprints = {
     "Marvel": seed_imprints["Marvel"].copy(),
     "DC Comics": additional_seed_imprints["DC Comics"].copy(),
 }
-all_seed_imprints["Marvel"].update(additional_seed_imprints["Marvel"])
+all_seed_imprints["Marvel"].update(additional_seed_imprints["Marvel"].items())
 
 conflicting_seed_imprints = {"Marvel": {"test": "Never"}}
 
@@ -286,5 +286,121 @@ metadata_prepared = (
             data_origin=comicapi.genericmetadata.MetadataOrigin("SOURCE", "Source"),
             notes="Tagged with ComicTagger 1.3.2a5 using info from Source on 2022-04-16 15:52:26. [Issue ID 123]",
         ),
+    ),
+)
+
+issueidentifier_score = (  # type: ignore[var-annotated]
+    (
+        (
+            None,
+            [],
+        ),
+        {
+            "remote_hash": 0,
+            "score": 100,
+            "url": "",
+            "local_hash": 0,
+            "local_hash_name": "0",
+        },
+    ),
+    (
+        (
+            # Test invalid ImageHash Kind value
+            comicapi.genericmetadata.ImageHash(
+                Hash=0,
+                Kind="",
+                URL="",
+            ),
+            [],
+        ),
+        {
+            "remote_hash": 0,
+            "score": 100,
+            "url": "",
+            "local_hash": 0,
+            "local_hash_name": "0",
+        },
+    ),
+    (
+        (
+            # Test URL alternative
+            comicapi.genericmetadata.ImageHash(
+                Hash=0,
+                Kind="ahash",
+                URL="",
+            ),
+            [
+                comicapi.genericmetadata.ImageHash(
+                    URL="https://comicvine.gamespot.com/a/uploads/scale_large/0/574/585444-109004_20080707014047_large.jpg",
+                    Hash=0,
+                    Kind="",
+                )
+            ],
+        ),
+        {
+            "remote_hash": 212201432349720,
+            "score": 0,
+            "url": "https://comicvine.gamespot.com/a/uploads/scale_large/0/574/585444-109004_20080707014047_large.jpg",
+            "local_hash": 212201432349720,
+            "local_hash_name": "Cover 1",
+        },
+    ),
+    (
+        (
+            # Test hash alternative
+            comicapi.genericmetadata.ImageHash(
+                Hash=0,
+                Kind="ahash",
+                URL="",
+            ),
+            [
+                comicapi.genericmetadata.ImageHash(
+                    Hash=212201432349720,
+                    Kind="ahash",
+                    URL="",
+                ),
+            ],
+        ),
+        {
+            "remote_hash": 212201432349720,
+            "score": 0,
+            "url": "",
+            "local_hash": 212201432349720,
+            "local_hash_name": "Cover 1",
+        },
+    ),
+    (
+        (
+            comicapi.genericmetadata.ImageHash(
+                Hash=212201432349720,
+                Kind="ahash",
+                URL="",
+            ),
+            [],
+        ),
+        {
+            "remote_hash": 212201432349720,
+            "score": 0,
+            "url": "",
+            "local_hash": 212201432349720,
+            "local_hash_name": "Cover 1",
+        },
+    ),
+    (
+        (
+            comicapi.genericmetadata.ImageHash(
+                Hash=0,
+                Kind="",
+                URL="https://comicvine.gamespot.com/a/uploads/scale_large/0/574/585444-109004_20080707014047_large.jpg",
+            ),
+            [],
+        ),
+        {
+            "remote_hash": 212201432349720,
+            "score": 0,
+            "url": "https://comicvine.gamespot.com/a/uploads/scale_large/0/574/585444-109004_20080707014047_large.jpg",
+            "local_hash": 212201432349720,
+            "local_hash_name": "Cover 1",
+        },
     ),
 )

@@ -1,25 +1,10 @@
 from __future__ import annotations
 
-import dataclasses
 from collections.abc import Collection
 from enum import auto
-from typing import Any
+from typing import Any, Callable
 
 from comicapi.utils import DefaultDict, StrEnum, norm_fold
-
-
-@dataclasses.dataclass
-class Credit:
-    person: str = ""
-    role: str = ""
-    primary: bool = False
-    language: str = ""  # Should be ISO 639 language code
-
-    def __str__(self) -> str:
-        lang = ""
-        if self.language:
-            lang = f" [{self.language}]"
-        return f"{self.role}: {self.person}{lang}"
 
 
 class Mode(StrEnum):
@@ -29,9 +14,9 @@ class Mode(StrEnum):
 
 def merge_lists(old: Collection[Any], new: Collection[Any]) -> list[Any] | set[Any]:
     """Dedupes normalised (NFKD), casefolded values using 'new' values on collisions"""
-    if len(new) == 0:
+    if not new:
         return old if isinstance(old, set) else list(old)
-    if len(old) == 0:
+    if not old:
         return new if isinstance(new, set) else list(new)
 
     # Create dict to preserve case
@@ -54,7 +39,7 @@ def overlay(old: Any, new: Any) -> Any:
     return new
 
 
-attribute = DefaultDict(
+attribute: DefaultDict[Mode, Callable[[Any, Any], Any]] = DefaultDict(
     {
         Mode.OVERLAY: overlay,
         Mode.ADD_MISSING: lambda old, new: overlay(new, old),
@@ -63,7 +48,7 @@ attribute = DefaultDict(
 )
 
 
-lists = DefaultDict(
+lists: DefaultDict[Mode, Callable[[Collection[Any], Collection[Any]], list[Any] | set[Any]]] = DefaultDict(
     {
         Mode.OVERLAY: merge_lists,
         Mode.ADD_MISSING: lambda old, new: merge_lists(new, old),

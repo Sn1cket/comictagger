@@ -315,6 +315,10 @@ def lex_text(lex: Lexer) -> LexerFunc:
                     lex.backup()
                     lex.emit(key[word.casefold()])
                     return lex_filename
+                elif cal(word):
+                    lex.backup()
+                    lex.emit(ItemType.Calendar)
+                    return lex_filename
         else:
             lex.backup()
             word = lex.input[lex.start : lex.pos + 1]
@@ -382,7 +386,7 @@ def lex_number(lex: Lexer) -> LexerFunc | None:
     return lex_filename
 
 
-def lex_issue_number(lex: Lexer) -> Callable[[Lexer], Callable | None] | None:  # type: ignore[type-arg]
+def lex_issue_number(lex: Lexer) -> LexerFunc:
     # Only called when lex.input[lex.start] == "#"
     original_start = lex.pos
     lex.accept_run(str.isalpha)

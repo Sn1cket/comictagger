@@ -31,7 +31,7 @@
         <number>0</number>
        </property>
        <item alignment="Qt::AlignTop">
-        <widget class="QWidget" name="imageContainer" native="true">
+        <widget class="QWidget" name="coverImageContainer" native="true">
          <property name="sizePolicy">
           <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
            <horstretch>0</horstretch>
@@ -66,7 +66,7 @@
         </widget>
        </item>
        <item>
-        <widget class="QLabel" name="lblSourceName">
+        <widget class="QLabel" name="lblIssuesSourceName">
          <property name="sizePolicy">
           <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
            <horstretch>0</horstretch>
@@ -81,6 +81,31 @@
          </property>
          <property name="text">
           <string>Data Source:</string>
+         </property>
+         <property name="alignment">
+          <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignTop</set>
+         </property>
+         <property name="openExternalLinks">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QLabel" name="lblSeriesLink">
+         <property name="sizePolicy">
+          <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
+           <horstretch>0</horstretch>
+           <verstretch>0</verstretch>
+          </sizepolicy>
+         </property>
+         <property name="maximumSize">
+          <size>
+           <width>300</width>
+           <height>16777215</height>
+          </size>
+         </property>
+         <property name="text">
+          <string>Series Link:</string>
          </property>
          <property name="alignment">
           <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignTop</set>
@@ -177,7 +202,7 @@
            </property>
           </column>
          </widget>
-         <widget class="QTextEdit" name="teDetails">
+         <widget class="QTextEdit" name="teDescription">
           <property name="sizePolicy">
            <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
             <horstretch>0</horstretch>
@@ -223,7 +248,7 @@
           </widget>
          </item>
          <item>
-          <widget class="QCheckBox" name="cbxFilter">
+          <widget class="QCheckBox" name="cbxPublisherFilter">
            <property name="toolTip">
             <string>Filter the publishers based on the publisher filter.</string>
            </property>

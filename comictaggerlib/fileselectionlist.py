@@ -1,4 +1,4 @@
-"""A PyQt5 widget for managing list of comic archive files"""
+"""A PyQt6 widget for managing list of comic archive files"""
 
 #
 # Copyright 2012-2014 ComicTagger Authors
@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import logging
 import os
+import pathlib
 import platform
 from typing import Callable, cast
 
-from PyQt5 import QtCore, QtWidgets, uic
+from PyQt6 import QtCore, QtGui, QtWidgets, uic
 
 from comicapi import utils
 from comicapi.comicarchive import ComicArchive
@@ -29,7 +30,7 @@ from comictaggerlib.ctsettings import ct_ns
 from comictaggerlib.graphics import graphics_path
 from comictaggerlib.optionalmsgdialog import OptionalMessageDialog
 from comictaggerlib.settingswindow import linuxRarHelp, macRarHelp, windowsRarHelp
-from comictaggerlib.ui import ui_path
+from comictaggerlib.ui import qtutils, ui_path
 from comictaggerlib.ui.qtutils import center_window_on_parent
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,7 @@ class FileSelectionList(QtWidgets.QWidget):
             uic.loadUi(uifile, self)
 
         self.config = config
-
+        self.twList: QtWidgets.QTableWidget
         self.twList.horizontalHeader().setMinimumSectionSize(50)
         self.twList.currentItemChanged.connect(self.current_item_changed_cb)
 
@@ -63,9 +64,9 @@ class FileSelectionList(QtWidgets.QWidget):
         self.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.ActionsContextMenu)
         self.dirty_flag = False
 
-        select_all_action = QtWidgets.QAction("Select All", self)
-        remove_action = QtWidgets.QAction("Remove Selected Items", self)
-        self.separator = QtWidgets.QAction("", self)
+        select_all_action = QtGui.QAction("Select All", self)
+        remove_action = QtGui.QAction("Remove Selected Items", self)
+        self.separator = QtGui.QAction("", self)
         self.separator.setSeparator(True)
 
         select_all_action.setShortcut("Ctrl+A")
@@ -78,19 +79,21 @@ class FileSelectionList(QtWidgets.QWidget):
         self.addAction(remove_action)
         self.addAction(self.separator)
 
+        self.loaded_paths: set[pathlib.Path] = set()
+
         self.dirty_flag_verification = dirty_flag_verification
         self.rar_ro_shown = False
 
     def get_sorting(self) -> tuple[int, int]:
         col = self.twList.horizontalHeader().sortIndicatorSection()
-        order = self.twList.horizontalHeader().sortIndicatorOrder()
+        order = self.twList.horizontalHeader().sortIndicatorOrder().value
         return int(col), int(order)
 
     def set_sorting(self, col: int, order: QtCore.Qt.SortOrder) -> None:
         self.twList.horizontalHeader().setSortIndicator(col, order)
 
-    def add_app_action(self, action: QtWidgets.QAction) -> None:
-        self.insertAction(QtWidgets.QAction(), action)
+    def add_app_action(self, action: QtGui.QAction) -> None:
+        self.insertAction(QtGui.QAction(), action)
 
     def set_modified_flag(self, modified: bool) -> None:
         self.dirty_flag = modified
@@ -105,6 +108,17 @@ class FileSelectionList(QtWidgets.QWidget):
             QtWidgets.QTableWidgetSelectionRange(0, 0, self.twList.rowCount() - 1, self.twList.columnCount() - 1), False
         )
 
+    def remove_deleted(self) -> None:
+        deleted = []
+        for row in range(self.twList.rowCount()):
+            row_ca = self.get_archive_by_row(row)
+            if not row_ca:
+                continue
+            if not row_ca.path.exists():
+                deleted.append(row_ca)
+
+        self.remove_archive_list(deleted)
+
     def remove_archive_list(self, ca_list: list[ComicArchive]) -> None:
         self.twList.setSortingEnabled(False)
         current_removed = False
@@ -115,6 +129,7 @@ class FileSelectionList(QtWidgets.QWidget):
                     if row == self.twList.currentRow():
                         current_removed = True
                     self.twList.removeRow(row)
+                    self.loaded_paths -= {ca.path}
                     break
         self.twList.setSortingEnabled(True)
 
@@ -142,7 +157,7 @@ class FileSelectionList(QtWidgets.QWidget):
             if item.column() == 0:
                 row_list.append(item.row())
 
-        if len(row_list) == 0:
+        if not row_list:
             return
 
         if self.twList.currentRow() in row_list:
@@ -158,6 +173,7 @@ class FileSelectionList(QtWidgets.QWidget):
         self.twList.setSortingEnabled(False)
 
         for i in row_list:
+            self.loaded_paths -= {self.get_archive_by_row(i).path}  # type: ignore[union-attr]
             self.twList.removeRow(i)
 
         self.twList.setSortingEnabled(True)
@@ -188,21 +204,20 @@ class FileSelectionList(QtWidgets.QWidget):
             progdialog.show()
             center_window_on_parent(progdialog)
 
-        QtCore.QCoreApplication.processEvents()
         first_added = None
         rar_added_ro = False
         self.twList.setSortingEnabled(False)
         for idx, f in enumerate(filelist):
-            QtCore.QCoreApplication.processEvents()
+            if idx % 10 == 0:
+                QtCore.QCoreApplication.processEvents()
             if progdialog is not None:
                 if progdialog.wasCanceled():
                     break
                 progdialog.setValue(idx + 1)
                 progdialog.setLabelText(f)
-            QtCore.QCoreApplication.processEvents()
-            row = self.add_path_item(f)
+
+            row, ca = self.add_path_item(f)
             if row is not None:
-                ca = self.get_archive_by_row(row)
                 rar_added_ro = bool(ca and ca.archiver.name() == "RAR" and not ca.archiver.is_writable())
                 if first_added is None and row != -1:
                     first_added = row
@@ -215,11 +230,8 @@ class FileSelectionList(QtWidgets.QWidget):
             self.twList.selectRow(first_added)
         else:
             if len(pathlist) == 1 and os.path.isfile(pathlist[0]):
-                QtWidgets.QMessageBox.information(
-                    self, "File Open", "Selected file doesn't seem to be a comic archive."
-                )
-            else:
-                QtWidgets.QMessageBox.information(self, "File/Folder Open", "No readable comic archives were found.")
+                return qtutils.information(self, "File Open", "Selected file doesn't seem to be a comic archive.")
+            return qtutils.information(self, "File/Folder Open", "No readable comic archives were found.")
 
         if rar_added_ro:
             self.rar_ro_message()
@@ -256,27 +268,32 @@ class FileSelectionList(QtWidgets.QWidget):
             )
             self.rar_ro_shown = True
 
-    def is_list_dupe(self, path: str) -> bool:
-        return self.get_current_list_row(path) >= 0
+    def get_current_list_row(self, path: str) -> tuple[int, ComicArchive]:
+        pl = pathlib.Path(path)
+        if pl not in self.loaded_paths:
+            return -1, None  # type: ignore[return-value]
 
-    def get_current_list_row(self, path: str) -> int:
         for r in range(self.twList.rowCount()):
             ca = cast(ComicArchive, self.get_archive_by_row(r))
-            if str(ca.path) == path:
-                return r
+            if ca.path == pl:
+                return r, ca
 
-        return -1
+        return -1, None  # type: ignore[return-value]
 
-    def add_path_item(self, path: str) -> int:
+    def add_path_item(self, path: str) -> tuple[int, ComicArchive]:
         path = str(path)
         path = os.path.abspath(path)
 
-        if self.is_list_dupe(path):
-            return self.get_current_list_row(path)
+        current_row, ca = self.get_current_list_row(path)
+        if current_row >= 0:
+            return current_row, ca
 
-        ca = ComicArchive(path, str(graphics_path / "nocover.png"))
+        ca = ComicArchive(
+            path, str(graphics_path / "nocover.png"), hash_archive=self.config.Runtime_Options__preferred_hash
+        )
 
         if ca.seems_to_be_a_comic_archive():
+            self.loaded_paths.add(ca.path)
             row: int = self.twList.rowCount()
             self.twList.insertRow(row)
 
@@ -286,46 +303,67 @@ class FileSelectionList(QtWidgets.QWidget):
             readonly_item = QtWidgets.QTableWidgetItem()
             type_item = QtWidgets.QTableWidgetItem()
 
+            item_text = os.path.split(ca.path)[1]
+
             filename_item.setFlags(QtCore.Qt.ItemFlag.ItemIsSelectable | QtCore.Qt.ItemFlag.ItemIsEnabled)
             filename_item.setData(QtCore.Qt.ItemDataRole.UserRole, ca)
+            filename_item.setText(item_text)
+            filename_item.setData(QtCore.Qt.ItemDataRole.ToolTipRole, item_text)
             self.twList.setItem(row, FileSelectionList.fileColNum, filename_item)
 
+            item_text = os.path.split(ca.path)[0]
+
+            folder_item.setText(item_text)
+            folder_item.setData(QtCore.Qt.ItemDataRole.ToolTipRole, item_text)
             folder_item.setFlags(QtCore.Qt.ItemFlag.ItemIsSelectable | QtCore.Qt.ItemFlag.ItemIsEnabled)
             self.twList.setItem(row, FileSelectionList.folderColNum, folder_item)
 
             type_item.setFlags(QtCore.Qt.ItemFlag.ItemIsSelectable | QtCore.Qt.ItemFlag.ItemIsEnabled)
             self.twList.setItem(row, FileSelectionList.typeColNum, type_item)
 
+            md_item.setText(", ".join(x for x in ca.get_supported_tags() if ca.has_tags(x)))
             md_item.setFlags(QtCore.Qt.ItemFlag.ItemIsSelectable | QtCore.Qt.ItemFlag.ItemIsEnabled)
             md_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter)
             self.twList.setItem(row, FileSelectionList.MDFlagColNum, md_item)
 
+            if not ca.is_writable():
+                readonly_item.setCheckState(QtCore.Qt.CheckState.Checked)
+                readonly_item.setData(QtCore.Qt.ItemDataRole.UserRole, True)
+                readonly_item.setText(" ")
+            else:
+                readonly_item.setData(QtCore.Qt.ItemDataRole.UserRole, False)
+                readonly_item.setCheckState(QtCore.Qt.CheckState.Unchecked)
+                # This is a nbsp it sorts after a space ' '
+                readonly_item.setText("\xa0")
             readonly_item.setFlags(QtCore.Qt.ItemFlag.ItemIsSelectable | QtCore.Qt.ItemFlag.ItemIsEnabled)
             readonly_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter)
             self.twList.setItem(row, FileSelectionList.readonlyColNum, readonly_item)
 
-            self.update_row(row)
-
-            return row
-        return -1
+            return row, ca
+        return -1, None  # type: ignore[return-value]
 
     def update_row(self, row: int) -> None:
         if row >= 0:
             ca: ComicArchive = self.twList.item(row, FileSelectionList.dataColNum).data(QtCore.Qt.ItemDataRole.UserRole)
 
             filename_item = self.twList.item(row, FileSelectionList.fileColNum)
+            assert filename_item
             folder_item = self.twList.item(row, FileSelectionList.folderColNum)
+            assert folder_item
             md_item = self.twList.item(row, FileSelectionList.MDFlagColNum)
+            assert md_item
             type_item = self.twList.item(row, FileSelectionList.typeColNum)
+            assert type_item
             readonly_item = self.twList.item(row, FileSelectionList.readonlyColNum)
-
-            item_text = os.path.split(ca.path)[0]
-            folder_item.setText(item_text)
-            folder_item.setData(QtCore.Qt.ItemDataRole.ToolTipRole, item_text)
+            assert readonly_item
 
             item_text = os.path.split(ca.path)[1]
             filename_item.setText(item_text)
             filename_item.setData(QtCore.Qt.ItemDataRole.ToolTipRole, item_text)
+
+            item_text = os.path.split(ca.path)[0]
+            folder_item.setText(item_text)
+            folder_item.setData(QtCore.Qt.ItemDataRole.ToolTipRole, item_text)
 
             item_text = ca.archiver.name()
             type_item.setText(item_text)
@@ -372,6 +410,10 @@ class FileSelectionList(QtWidgets.QWidget):
                 old_idx = prev.row()
 
             if old_idx == new_idx:
+                return
+            ca = self.get_archive_by_row(new_idx)
+            if not ca or not ca.path.exists():
+                self.remove_deleted()
                 return
 
             # don't allow change if modified

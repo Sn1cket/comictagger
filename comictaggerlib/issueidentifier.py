@@ -16,8 +16,13 @@
 # limitations under the License.
 from __future__ import annotations
 
+import copy
+import dataclasses
+import functools
 import io
 import logging
+import pathlib
+from enum import Enum, auto
 from operator import attrgetter
 from typing import Any, Callable
 
@@ -25,13 +30,12 @@ from typing_extensions import NotRequired, TypedDict
 
 from comicapi import utils
 from comicapi.comicarchive import ComicArchive
-from comicapi.genericmetadata import ComicSeries, GenericMetadata
+from comicapi.genericmetadata import ComicSeries, GenericMetadata, ImageHash
 from comicapi.issuestring import IssueString
-from comictaggerlib.ctsettings import ct_ns
 from comictaggerlib.imagefetcher import ImageFetcher, ImageFetcherException
 from comictaggerlib.imagehasher import ImageHasher
 from comictaggerlib.resulttypes import IssueResult
-from comictalker.comictalker import ComicTalker, TalkerError
+from comictalker.comictalker import ComicTalker, RLCallBack, TalkerError
 
 logger = logging.getLogger(__name__)
 
@@ -69,25 +73,36 @@ class IssueIdentifierNetworkError(Exception): ...
 class IssueIdentifierCancelled(Exception): ...
 
 
-class IssueIdentifier:
-    result_no_matches = 0
-    result_found_match_but_bad_cover_score = 1
-    result_found_match_but_not_first_page = 2
-    result_multiple_matches_with_bad_image_scores = 3
-    result_one_good_match = 4
-    result_multiple_good_matches = 5
+class Result(Enum):
+    single_good_match = auto()
+    no_matches = auto()
+    single_bad_cover_score = auto()
+    multiple_bad_cover_scores = auto()
+    multiple_good_matches = auto()
 
+
+@dataclasses.dataclass
+class IssueIdentifierOptions:
+    series_match_search_thresh: int
+    series_match_identify_thresh: int
+    use_publisher_filter: bool
+    publisher_filter: list[str]
+    quiet: bool
+    cache_dir: pathlib.Path
+    border_crop_percent: int
+    talker: ComicTalker
+
+
+class IssueIdentifier:
     def __init__(
         self,
-        comic_archive: ComicArchive,
-        config: ct_ns,
-        talker: ComicTalker,
-        metadata: GenericMetadata = GenericMetadata(),
+        config: IssueIdentifierOptions,
+        on_rate_limit: RLCallBack | None,
+        output: Callable[[str], Any] = print,
+        on_progress: Callable[[int, int, bytes], Any] | None = None,
     ) -> None:
         self.config = config
-        self.talker = talker
-        self.comic_archive: ComicArchive = comic_archive
-        self.md = metadata
+        self.talker = config.talker
         self.image_hasher = 1
 
         self.only_use_additional_meta_data = False
@@ -108,37 +123,31 @@ class IssueIdentifier:
 
         # used to eliminate series names that are too long based on our search
         # string
-        self.series_match_thresh = config.Issue_Identifier__series_match_identify_thresh
+        self.series_match_thresh = config.series_match_identify_thresh
 
         # used to eliminate unlikely publishers
-        self.use_publisher_filter = config.Auto_Tag__use_publisher_filter
-        self.publisher_filter = [s.strip().casefold() for s in config.Auto_Tag__publisher_filter]
+        self.use_publisher_filter = config.use_publisher_filter
+        self.publisher_filter = [s.strip().casefold() for s in config.publisher_filter]
 
         self.additional_metadata = GenericMetadata()
-        self.output_function: Callable[[str], None] = print
-        self.progress_callback: Callable[[int, int], None] | None = None
-        self.cover_url_callback: Callable[[bytes], None] | None = None
-        self.search_result = self.result_no_matches
+        self.output_function = output
+        self.progress_callback: Callable[[int, int, bytes], Any] = lambda *x: ...
+        if on_progress:
+            self.progress_callback = on_progress
+        self.on_rate_limit = on_rate_limit
+        self.search_result = Result.no_matches
         self.cancel = False
+        self.current_progress = (0, 0)
 
         self.match_list: list[IssueResult] = []
 
-    def set_output_function(self, func: Callable[[str], None]) -> None:
-        self.output_function = func
-
-    def set_progress_callback(self, cb_func: Callable[[int, int], None]) -> None:
-        self.progress_callback = cb_func
-
-    def set_cover_url_callback(self, cb_func: Callable[[bytes], None]) -> None:
-        self.cover_url_callback = cb_func
-
-    def calculate_hash(self, image_data: bytes) -> int:
+    def calculate_hash(self, image_data: bytes = b"", image: Image.Image | None = None) -> int:
         if self.image_hasher == 3:
-            return ImageHasher(data=image_data).p_hash()
+            return ImageHasher(data=image_data, image=image).perception_hash()
         if self.image_hasher == 2:
-            return -1  # ImageHasher(data=image_data).average_hash2()
+            return -1  # ImageHasher(data=image_data, image=image).average_hash2()
 
-        return ImageHasher(data=image_data).average_hash()
+        return ImageHasher(data=image_data, image=image).average_hash()
 
     def log_msg(self, msg: Any) -> None:
         msg = str(msg)
@@ -161,23 +170,23 @@ class IssueIdentifier:
         # Always send to logger so that we have a record for troubleshooting
         logger.info(log_msg, **kwargs)
 
-        # If we are verbose or quiet we don't need to call the output function
-        if self.config.Runtime_Options__verbose > 0 or self.config.Runtime_Options__quiet:
+        # If we are quiet we don't need to call the output function
+        if self.config.quiet:
             return
 
         # default output is stdout
         self.output_function(*args, **kwargs)
 
-    def identify(self, ca: ComicArchive, md: GenericMetadata) -> tuple[int, list[IssueResult]]:
+    def identify(self, ca: ComicArchive, md: GenericMetadata) -> tuple[Result, list[IssueResult]]:
         if not self._check_requirements(ca):
-            return self.result_no_matches, []
+            return Result.no_matches, []
 
         terms, images, extra_images = self._get_search_terms(ca, md)
 
         # we need, at minimum, a series and issue number
         if not (terms["series"] and terms["issue_number"]):
             self.log_msg("Not enough info for a search!")
-            return self.result_no_matches, []
+            return Result.no_matches, []
 
         self._print_terms(terms, images)
 
@@ -185,7 +194,7 @@ class IssueIdentifier:
 
         self.log_msg(f"Found {len(issues)} series that have an issue #{terms['issue_number']}")
 
-        final_cover_matching = self._cover_matching(terms, images, extra_images, issues)
+        final_cover_matching, full = self._cover_matching(terms, images, extra_images, issues)
 
         # One more test for the case choosing limited series first issue vs a trade with the same cover:
         # if we have a given issue count > 1 and the series from CV has count==1, remove it from match list
@@ -197,38 +206,38 @@ class IssueIdentifier:
                     )
                     final_cover_matching.remove(match)
 
+        best_score = 0
         if final_cover_matching:
             best_score = final_cover_matching[0].distance
-        else:
-            best_score = 0
         if best_score >= self.min_score_thresh:
             if len(final_cover_matching) == 1:
                 self.log_msg("No matching pages in the issue.")
                 self.log_msg("--------------------------------------------------------------------------")
                 self._print_match(final_cover_matching[0])
                 self.log_msg("--------------------------------------------------------------------------")
-                search_result = self.result_found_match_but_bad_cover_score
+                search_result = Result.single_bad_cover_score
             else:
                 self.log_msg("--------------------------------------------------------------------------")
                 self.log_msg("Multiple bad cover matches!  Need to use other info...")
                 self.log_msg("--------------------------------------------------------------------------")
-                search_result = self.result_multiple_matches_with_bad_image_scores
+                search_result = Result.multiple_bad_cover_scores
         else:
             if len(final_cover_matching) == 1:
                 self.log_msg("--------------------------------------------------------------------------")
                 self._print_match(final_cover_matching[0])
                 self.log_msg("--------------------------------------------------------------------------")
-                search_result = self.result_one_good_match
+                search_result = Result.single_good_match
 
-            elif len(self.match_list) == 0:
+            elif not final_cover_matching:
                 self.log_msg("--------------------------------------------------------------------------")
                 self.log_msg("No matches found :(")
                 self.log_msg("--------------------------------------------------------------------------")
-                search_result = self.result_no_matches
+                search_result = Result.no_matches
             else:
                 # we've got multiple good matches:
                 self.log_msg("More than one likely candidate.")
-                search_result = self.result_multiple_good_matches
+                search_result = Result.multiple_good_matches
+                final_cover_matching = full  # display more options for the user to pick
                 self.log_msg("--------------------------------------------------------------------------")
                 for match_item in final_cover_matching:
                     self._print_match(match_item)
@@ -289,14 +298,16 @@ class IssueIdentifier:
         remote_hashes: list[tuple[str, int]] = []
         for url in urls:
             try:
-                alt_url_image_data = ImageFetcher(self.config.Runtime_Options__config.user_cache_dir).fetch(
-                    url, blocking=True
-                )
+                alt_url_image_data = ImageFetcher(self.config.cache_dir).fetch(url, blocking=True)
             except ImageFetcherException as e:
                 self.log_msg(f"Network issue while fetching alt. cover image from {self.talker.name}. Aborting...")
                 raise IssueIdentifierNetworkError from e
 
-            self._user_canceled(self.cover_url_callback, alt_url_image_data)
+            self._user_canceled(
+                functools.partial(
+                    self.progress_callback, self.current_progress[0], self.current_progress[1], alt_url_image_data
+                )
+            )
 
             remote_hashes.append((url, self.calculate_hash(alt_url_image_data)))
 
@@ -306,26 +317,40 @@ class IssueIdentifier:
 
     def _get_issue_cover_match_score(
         self,
-        primary_img_url: str,
-        alt_urls: list[str],
+        primary_img_url: ImageHash | None,
+        alt_urls: list[ImageHash],
         local_hashes: list[tuple[str, int]],
-        use_alt_urls: bool = False,
     ) -> Score:
         # local_hashes is a list of pre-calculated hashes.
-        # use_alt_urls - indicates to use alternate covers from CV
 
-        # If there is no URL return 100
-        if not primary_img_url:
-            return Score(score=100, url="", remote_hash=0)
+        # If there is no ImageHash or no URL and Kind, return 100 for a bad match
+        if primary_img_url is None or (not primary_img_url.Kind and not primary_img_url.URL):
+            return Score(score=100, url="", remote_hash=0, local_hash=0, local_hash_name="0")
 
-        self._user_canceled()
+        # self._user_canceled()
 
-        urls = [primary_img_url]
-        if use_alt_urls:
-            urls.extend(alt_urls)
-            self.log_msg(f"[{len(alt_urls)} alt. covers]")
+        remote_hashes = []
 
-        remote_hashes = self._get_remote_hashes(urls)
+        if primary_img_url.Kind:
+            remote_hashes.append((primary_img_url.URL, primary_img_url.Hash))
+            self.log_msg(
+                f"Using provided hash for cover matching. Hash: {primary_img_url.Hash}, Kind: {primary_img_url.Kind}"
+            )
+        elif primary_img_url.URL:
+            remote_hashes = self._get_remote_hashes([primary_img_url.URL])
+            self.log_msg(f"Downloading image for cover matching: {primary_img_url.URL}")
+
+        only_urls = []
+        for alt_url in alt_urls:
+            if alt_url.Kind:
+                remote_hashes.append((alt_url.URL, alt_url.Hash))
+            elif alt_url.URL:
+                only_urls.append(alt_url.URL)
+        if only_urls:
+            remote_hashes.extend(self._get_remote_hashes(only_urls))
+
+        if alt_urls:
+            self.log_msg(f"[{len(alt_urls) - 1} alt. covers]")
 
         score_list = []
         done = False
@@ -350,6 +375,8 @@ class IssueIdentifier:
                     break
             if done:
                 break
+        if not score_list:
+            return Score(score=100, url="", remote_hash=0, local_hash=0, local_hash_name="0")
 
         best_score_item = min(score_list, key=lambda x: x["score"])
 
@@ -368,8 +395,8 @@ class IssueIdentifier:
 
     def _process_cover(self, name: str, image_data: bytes) -> list[tuple[str, Image.Image]]:
         assert Image
-        cover_image = Image.open(io.BytesIO(image_data))
-        images = [(name, cover_image)]
+        cover_image: Image.Image = Image.open(io.BytesIO(image_data))
+        images: list[tuple[str, Image.Image]] = [(name, cover_image)]
 
         # check the aspect ratio
         # if it's wider than it is high, it's probably a two page spread (back_cover, front_cover)
@@ -381,7 +408,7 @@ class IssueIdentifier:
                 images.append(("double page", im))
 
         # Check and remove black borders. Helps in identifying comics with an excessive black border like https://comicvine.gamespot.com/marvel-graphic-novel-1-the-death-of-captain-marvel/4000-21782/
-        cropped = self._crop_border(cover_image, self.config.Issue_Identifier__border_crop_percent)
+        cropped = self._crop_border(cover_image, self.config.border_crop_percent)
         if cropped is not None:
             images.append(("black border cropped", cropped))
 
@@ -404,7 +431,7 @@ class IssueIdentifier:
 
     def _get_search_keys(self, md: GenericMetadata) -> Any:
         search_keys = SearchKeys(
-            series=md.series,
+            series=md.series or "",
             issue_number=IssueString(md.issue).as_string(),
             alternate_number=IssueString(md.alternate_number).as_string(),
             month=md.month,
@@ -421,11 +448,11 @@ class IssueIdentifier:
     ) -> tuple[SearchKeys, list[tuple[str, Image.Image]], list[tuple[str, Image.Image]]]:
         return self._get_search_keys(md), self._get_images(ca, md), self._get_extra_images(ca, md)
 
-    def _user_canceled(self, callback: Callable[..., Any] | None = None, *args: Any) -> Any:
+    def _user_canceled(self, callback: Callable[[], Any] | None = None) -> Any:
         if self.cancel:
             raise IssueIdentifierCancelled
         if callback is not None:
-            return callback(*args)
+            return callback()
 
     def _print_terms(self, keys: SearchKeys, images: list[tuple[str, Image.Image]]) -> None:
         assert keys["series"]
@@ -490,7 +517,7 @@ class IssueIdentifier:
     def _calculate_hashes(self, images: list[tuple[str, Image.Image]]) -> list[tuple[str, int]]:
         hashes = []
         for name, image in images:
-            hashes.append((name, ImageHasher(image=image).average_hash()))
+            hashes.append((name, self.calculate_hash(image=image)))
         return hashes
 
     def _match_covers(
@@ -508,7 +535,8 @@ class IssueIdentifier:
         if use_alternates:
             alternate = " Alternate"
         for series, issue in issues:
-            self._user_canceled(self.progress_callback, counter, len(issues))
+            self.current_progress = counter, len(issues)
+            self._user_canceled(functools.partial(self.progress_callback, counter, len(issues), b""))
             counter += 1
 
             self.log_msg(
@@ -516,12 +544,15 @@ class IssueIdentifier:
             )
 
             try:
-                image_url = issue._cover_image or ""
-                alt_urls = issue._alternate_images
+                # We only include urls in the IssueResult so we don't have to deal with it down the line
+                # TODO: display the hash to the user so they know a direct hash was used instead of downloading an image
+                alt_urls: list[str] = [img.URL for img in issue._alternate_images]
 
-                score_item = self._get_issue_cover_match_score(image_url, alt_urls, hashes, use_alt_urls=use_alternates)
+                alt_images = issue._alternate_images if use_alternates else []
+
+                score_item = self._get_issue_cover_match_score(issue._cover_image, alt_images, hashes)
             except Exception:
-                logger.exception(f"Scoring series{alternate} covers failed")
+                logger.exception("Scoring series%s covers failed", alternate)
                 return []
 
             match = IssueResult(
@@ -536,7 +567,7 @@ class IssueIdentifier:
                 month=issue.month,
                 year=issue.year,
                 publisher=None,
-                image_url=image_url,
+                image_url=issue._cover_image.URL if issue._cover_image else "",
                 alt_image_urls=alt_urls,
                 description=issue.description or "",
             )
@@ -566,8 +597,9 @@ class IssueIdentifier:
         try:
             search_results = self.talker.search_for_series(
                 terms["series"],
-                callback=lambda x, y: self._user_canceled(self.progress_callback, x, y),
-                series_match_thresh=self.config.Issue_Identifier__series_match_search_thresh,
+                callback=lambda x, y: self._user_canceled(functools.partial(self.progress_callback, x, y, b"")),
+                series_match_thresh=self.config.series_match_search_thresh,
+                on_rate_limit=self.on_rate_limit,
             )
         except TalkerError as e:
             self.log_msg(f"Error searching for series.\n{e}")
@@ -584,13 +616,16 @@ class IssueIdentifier:
 
         self.log_msg(f"Searching in {len(filtered_series)} series")
 
-        self._user_canceled(self.progress_callback, 0, len(filtered_series))
+        self._user_canceled(functools.partial(self.progress_callback, 0, len(filtered_series), b""))
 
         series_by_id = {series.id: series for series in filtered_series}
 
         try:
             talker_result = self.talker.fetch_issues_by_series_issue_num_and_year(
-                list(series_by_id.keys()), terms["issue_number"], terms["year"]
+                list(series_by_id.keys()),
+                terms["issue_number"],
+                terms["year"],
+                on_rate_limit=self.on_rate_limit,
             )
         except TalkerError as e:
             self.log_msg(f"Issue with while searching for series details. Aborting...\n{e}")
@@ -601,7 +636,7 @@ class IssueIdentifier:
         if not talker_result:
             return []
 
-        self._user_canceled(self.progress_callback, 0, 0)
+        self._user_canceled(functools.partial(self.progress_callback, 0, 0, b""))
 
         issues: list[tuple[ComicSeries, GenericMetadata]] = []
 
@@ -619,12 +654,22 @@ class IssueIdentifier:
         images: list[tuple[str, Image.Image]],
         extra_images: list[tuple[str, Image.Image]],
         issues: list[tuple[ComicSeries, GenericMetadata]],
-    ) -> list[IssueResult]:
+    ) -> tuple[list[IssueResult], list[IssueResult]]:
+        # Set hashing kind, will presume all hashes are of the same kind
+        for series, issue in issues:
+            if isinstance(issue._cover_image, ImageHash):
+                if issue._cover_image.Kind == "phash":
+                    self.image_hasher = 3
+                    break
+                elif issue._cover_image.Kind == "ahash":
+                    self.image_hasher = 1  # Set to 1 on init but might as well be sure
+                    break
+
         cover_matching_1 = self._match_covers(terms, images, issues, use_alternates=False)
 
-        if len(cover_matching_1) == 0:
+        if not cover_matching_1:
             self.log_msg(":-( no matches!")
-            return cover_matching_1
+            return cover_matching_1, cover_matching_1
 
         # sort list by image match scores
         cover_matching_1.sort(key=attrgetter("distance"))
@@ -647,7 +692,7 @@ class IssueIdentifier:
                 if score.distance < self.min_alternate_score_thresh:
                     cover_matching_2.append(score)
 
-            if len(cover_matching_2) > 0:
+            if cover_matching_2:
                 # We did good, found something!
                 self.log_msg("Success in secondary/alternate cover matching!")
 
@@ -658,8 +703,14 @@ class IssueIdentifier:
                 # now drop down into the rest of the processing
 
         best_score = final_cover_matching[0].distance
+
+        full = copy.copy(final_cover_matching)
         # now pare down list, remove any item more than specified distant from the top scores
         for match_item in reversed(final_cover_matching):
             if match_item.distance > (best_score + self.min_score_distance):
                 final_cover_matching.remove(match_item)
-        return final_cover_matching
+
+        # If we have 5 or less results we don't trim as the user can pick
+        if len(final_cover_matching) > 5:
+            full = final_cover_matching
+        return final_cover_matching, full

@@ -3,6 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/comictagger)](https://pypi.org/project/comictagger/)
 [![PyPI - Downloads](https://img.shields.io/pypi/dm/comictagger)](https://pypistats.org/packages/comictagger)
 [![Chocolatey package](https://img.shields.io/chocolatey/dt/comictagger?color=blue&label=chocolatey)](https://community.chocolatey.org/packages/comictagger)
+[![WinGet](https://img.shields.io/winget/v/ComicTagger.ComicTagger)](https://github.com/microsoft/winget-pkgs/tree/master/manifests/c/ComicTagger/ComicTagger)
 [![PyPI - License](https://img.shields.io/pypi/l/comictagger)](https://opensource.org/licenses/Apache-2.0)
 
 [![GitHub Discussions](https://img.shields.io/github/discussions/comictagger/comictagger)](https://github.com/comictagger/comictagger/discussions)
@@ -61,6 +62,12 @@ Optional dependencies:
 A [Chocolatey package](https://community.chocolatey.org/packages/comictagger), maintained by @Xav83, is provided, you can install it with:
 ```powershell
 choco install comictagger
+```
+### WinGet installation (Windows only)
+
+A [WinGet package](https://github.com/microsoft/winget-pkgs/tree/master/manifests/c/ComicTagger/ComicTagger), maintained by @Sn1cket, is provided, you can install it with:
+```powershell
+winget install ComicTagger.ComicTagger
 ```
 ### From source
 
@@ -132,10 +139,24 @@ choco install comictagger
         </a>
     </td>
     <td align="center">
-        <a href="https://github.com/AlbanSeurat">
-            <img src="https://avatars.githubusercontent.com/u/500180?v=4" width="100;" alt="AlbanSeurat"/>
+        <a href="https://github.com/N-Hertstein">
+            <img src="https://avatars.githubusercontent.com/u/64664577?v=4" width="100;" alt="N-Hertstein"/>
             <br />
-            <sub><b>AlbanSeurat</b></sub>
+            <sub><b>N-Hertstein</b></sub>
+        </a>
+    </td>
+    <td align="center">
+        <a href="https://github.com/Kijaru">
+            <img src="https://avatars.githubusercontent.com/u/9641432?v=4" width="100;" alt="Kijaru"/>
+            <br />
+            <sub><b>Kijaru</b></sub>
+        </a>
+    </td>
+    <td align="center">
+        <a href="https://github.com/kcgthb">
+            <img src="https://avatars.githubusercontent.com/u/186807?v=4" width="100;" alt="kcgthb"/>
+            <br />
+            <sub><b>kcgthb</b></sub>
         </a>
     </td>
     <td align="center">
@@ -143,6 +164,28 @@ choco install comictagger
             <img src="https://avatars.githubusercontent.com/u/7084007?v=4" width="100;" alt="rhaussmann"/>
             <br />
             <sub><b>rhaussmann</b></sub>
+        </a>
+    </td>
+    <td align="center">
+        <a href="https://github.com/AlbanSeurat">
+            <img src="https://avatars.githubusercontent.com/u/500180?v=4" width="100;" alt="AlbanSeurat"/>
+            <br />
+            <sub><b>AlbanSeurat</b></sub>
+        </a>
+    </td></tr>
+<tr>
+    <td align="center">
+        <a href="https://github.com/Sn1cket">
+            <img src="https://avatars.githubusercontent.com/u/32904645?v=4" width="100;" alt="Sn1cket"/>
+            <br />
+            <sub><b>Sn1cket</b></sub>
+        </a>
+    </td>
+    <td align="center">
+        <a href="https://github.com/emmanuel-ferdman">
+            <img src="https://avatars.githubusercontent.com/u/35470921?v=4" width="100;" alt="emmanuel-ferdman"/>
+            <br />
+            <sub><b>emmanuel-ferdman</b></sub>
         </a>
     </td>
     <td align="center">
@@ -172,6 +215,14 @@ choco install comictagger
             <img src="https://avatars.githubusercontent.com/u/6787157?v=4" width="100;" alt="Xav83"/>
             <br />
             <sub><b>Xav83</b></sub>
+        </a>
+    </td></tr>
+<tr>
+    <td align="center">
+        <a href="https://github.com/kiryl85">
+            <img src="https://avatars.githubusercontent.com/u/12550714?v=4" width="100;" alt="kiryl85"/>
+            <br />
+            <sub><b>kiryl85</b></sub>
         </a>
     </td>
     <td align="center">

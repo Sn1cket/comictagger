@@ -26,7 +26,7 @@ import urllib.parse
 from typing import Any, cast
 
 import settngs
-from PyQt5 import QtCore, QtGui, QtWidgets, uic
+from PyQt6 import QtCore, QtGui, QtWidgets, uic
 
 import comictaggerlib.ui.talkeruigenerator
 from comicapi import merge, utils
@@ -36,7 +36,9 @@ from comictaggerlib import ctsettings
 from comictaggerlib.ctsettings import ct_ns
 from comictaggerlib.ctsettings.plugin import group_for_plugin
 from comictaggerlib.filerenamer import FileRenamer, Replacement, Replacements
-from comictaggerlib.ui import ui_path
+from comictaggerlib.imagefetcher import ImageFetcher
+from comictaggerlib.ui import qtutils, ui_path
+from comictalker.comiccacher import ComicCacher
 from comictalker.comictalker import ComicTalker
 
 logger = logging.getLogger(__name__)
@@ -91,6 +93,7 @@ Accepts the following variables:
 {alternate_series} (string)
 {alternate_number} (string)
 {alternate_count}  (integer)
+{gtin}             (string)
 {imprint}          (string)
 {notes}            (string)
 {web_link}         (string)
@@ -143,6 +146,8 @@ class SettingsWindow(QtWidgets.QDialog):
         with (ui_path / "settingswindow.ui").open(encoding="utf-8") as uifile:
             uic.loadUi(uifile, self)
 
+        self.leRarExePath: QtWidgets.QLineEdit
+
         self.setWindowFlags(
             QtCore.Qt.WindowType(self.windowFlags() & ~QtCore.Qt.WindowType.WindowContextHelpButtonHint)
         )
@@ -150,6 +155,8 @@ class SettingsWindow(QtWidgets.QDialog):
         self.config = config
         self.talkers = talkers
         self.name = "Settings"
+
+        self.setModal(True)
 
         if platform.system() == "Windows":
             self.lblRarHelp.setText(windowsRarHelp)
@@ -390,11 +397,16 @@ class SettingsWindow(QtWidgets.QDialog):
         fr.set_issue_zero_padding(int(self.leIssueNumPadding.text()))
         fr.set_smart_cleanup(self.cbxSmartCleanup.isChecked())
         try:
-            self.lblRenameTest.setText(fr.determine_name(".cbz"))
+            new_name = "<pre>"
+            new_name += fr.determine_name(".cbz")
+            new_name += "</pre>"
+            if fr.warnings:
+                new_name += '<span style="color: red"> Warnings:</span><br/>' + "<br/>".join(fr.warnings)
+            self.lblRenameTest.setText(new_name)
             self.rename_error = None
         except Exception as e:
             self.rename_error = e
-            self.lblRenameTest.setText(str(e))
+            self.lblRenameTest.setText(f'<span style="color: red">Error:</span><br/> {e}')
 
     def update_rar_path(self, *args: Any, **kwargs: Any) -> None:
         rar_path: Any = pathlib.Path(self.leRarExePath.text())
@@ -520,8 +532,10 @@ class SettingsWindow(QtWidgets.QDialog):
         self.rename_test()
         if self.rename_error is not None:
             if isinstance(self.rename_error, ValueError):
-                logger.exception("Invalid format string: %s", self.config[0].File_Rename__template)
-                QtWidgets.QMessageBox.critical(
+                logger.error(
+                    "Invalid format string: %s", self.config[0].File_Rename__template, exc_info=self.rename_error
+                )
+                return qtutils.critical(
                     self,
                     "Invalid format string!",
                     "Your rename template is invalid!"
@@ -531,20 +545,21 @@ class SettingsWindow(QtWidgets.QDialog):
                     + "<a href='https://docs.python.org/3/library/string.html#format-string-syntax'>"
                     + "https://docs.python.org/3/library/string.html#format-string-syntax</a>",
                 )
-                return
-            else:
-                logger.exception(
-                    "Formatter failure: %s metadata: %s", self.config[0].File_Rename__template, self.renamer.metadata
-                )
-                QtWidgets.QMessageBox.critical(
-                    self,
-                    "The formatter had an issue!",
-                    "The formatter has experienced an unexpected error!"
-                    + f"<br/><br/>{type(self.rename_error).__name__}: {self.rename_error}<br/><br/>"
-                    + "Please open an issue at "
-                    + "<a href='https://github.com/comictagger/comictagger'>"
-                    + "https://github.com/comictagger/comictagger</a>",
-                )
+            logger.error(
+                "Formatter failure: %s metadata: %s",
+                self.config[0].File_Rename__template,
+                self.renamer.metadata,
+                exc_info=self.rename_error,
+            )
+            return qtutils.critical(
+                self,
+                "The formatter had an issue!",
+                "The formatter has experienced an unexpected error!"
+                + f"<br/><br/>{type(self.rename_error).__name__}: {self.rename_error}<br/><br/>"
+                + "Please open an issue at "
+                + "<a href='https://github.com/comictagger/comictagger'>"
+                + "https://github.com/comictagger/comictagger</a>",
+            )
 
         # Copy values from form to settings and save
         archive_group = group_for_plugin(Archiver)
@@ -632,14 +647,17 @@ class SettingsWindow(QtWidgets.QDialog):
         self.update_rar_path()
 
     def clear_cache(self) -> None:
-        shutil.rmtree(self.config[0].Runtime_Options__config.user_cache_dir, ignore_errors=True)
-        self.config[0].Runtime_Options__config.user_cache_dir.mkdir(parents=True, exist_ok=True)
-        QtWidgets.QMessageBox.information(self, self.name, "Cache has been cleared.")
+        cache_folder = self.config[0].Runtime_Options__config.user_cache_dir
+        shutil.rmtree(cache_folder, ignore_errors=True)
+        cache_folder.mkdir(parents=True, exist_ok=True)
+        ComicCacher(cache_folder, "0")
+        ImageFetcher(cache_folder)
+        qtutils.information(self, self.name, "Cache has been cleared.")
 
     def reset_settings(self) -> None:
         self.config = cast(settngs.Config[ct_ns], settngs.get_namespace(settngs.defaults(self.config[1])))
         self.settings_to_form()
-        QtWidgets.QMessageBox.information(self, self.name, self.name + " have been returned to default values.")
+        qtutils.information(self, self.name, self.name + " have been returned to default values.")
 
     def select_file(self, control: QtWidgets.QLineEdit, name: str) -> None:
         dialog = QtWidgets.QFileDialog(self)
@@ -660,16 +678,17 @@ class SettingsWindow(QtWidgets.QDialog):
         else:
             dialog.setWindowTitle(f"Find {name} library")
 
-        if dialog.exec():
-            file_list = dialog.selectedFiles()
-            control.setText(str(file_list[0]))
+        dialog.fileSelected.connect(self.set_rar_path)
+        dialog.open()
+
+    def set_rar_path(self, path: str) -> None:
+        self.leRarExePath.setText(str(path))
 
     def show_rename_tab(self) -> None:
         self.tabWidget.setCurrentIndex(5)
 
     def show_template_help(self) -> None:
         template_help_win = TemplateHelpWindow(self)
-        template_help_win.setModal(False)
         template_help_win.show()
 
 

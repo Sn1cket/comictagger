@@ -21,6 +21,8 @@ class SettngsNS(settngs.TypedNS):
     Runtime_Options__config: comictaggerlib.ctsettings.types.ComicTaggerPaths
     Runtime_Options__verbose: int
     Runtime_Options__enable_quick_tag: bool
+    Runtime_Options__enable_embedding_hashes: bool
+    Runtime_Options__preferred_hash: str
     Runtime_Options__quiet: bool
     Runtime_Options__json: bool
     Runtime_Options__raw: bool
@@ -28,7 +30,7 @@ class SettngsNS(settngs.TypedNS):
     Runtime_Options__abort_on_low_confidence: bool
     Runtime_Options__dryrun: bool
     Runtime_Options__summary: bool
-    Runtime_Options__recursive: bool
+    Runtime_Options__directory: bool
     Runtime_Options__glob: bool
     Runtime_Options__darkmode: bool
     Runtime_Options__no_gui: bool
@@ -41,12 +43,12 @@ class SettngsNS(settngs.TypedNS):
 
     Quick_Tag__url: urllib3.util.url.Url
     Quick_Tag__max: int
-    Quick_Tag__simple: bool
     Quick_Tag__aggressive_filtering: bool
     Quick_Tag__hash: list[comictaggerlib.quick_tag.HashType]
     Quick_Tag__exact_only: bool
 
     internal__install_id: str
+    internal__embedded_hash_type: str
     internal__write_tags: list[str]
     internal__read_tags: list[str]
     internal__last_opened_folder: str
@@ -143,6 +145,8 @@ class Runtime_Options(typing.TypedDict):
     config: comictaggerlib.ctsettings.types.ComicTaggerPaths
     verbose: int
     enable_quick_tag: bool
+    enable_embedding_hashes: bool
+    preferred_hash: str
     quiet: bool
     json: bool
     raw: bool
@@ -150,7 +154,7 @@ class Runtime_Options(typing.TypedDict):
     abort_on_low_confidence: bool
     dryrun: bool
     summary: bool
-    recursive: bool
+    directory: bool
     glob: bool
     darkmode: bool
     no_gui: bool
@@ -165,7 +169,6 @@ class Runtime_Options(typing.TypedDict):
 class Quick_Tag(typing.TypedDict):
     url: urllib3.util.url.Url
     max: int
-    simple: bool
     aggressive_filtering: bool
     hash: list[comictaggerlib.quick_tag.HashType]
     exact_only: bool
@@ -173,6 +176,7 @@ class Quick_Tag(typing.TypedDict):
 
 class internal(typing.TypedDict):
     install_id: str
+    embedded_hash_type: str
     write_tags: list[str]
     read_tags: list[str]
     last_opened_folder: str

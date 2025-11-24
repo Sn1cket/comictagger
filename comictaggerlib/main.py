@@ -31,6 +31,7 @@ from typing import cast
 import settngs
 
 import comicapi.comicarchive
+import comicapi.filenamelexer
 import comicapi.utils
 import comictalker
 from comictaggerlib import cli, ctsettings, pillow_plugins
@@ -76,7 +77,7 @@ def _lang_code_mac() -> str:
         # Command was successful.
         lang_code = output
     else:
-        logging.warning("Language detection command failed: %r", output)
+        logger.warning("Language detection command failed: %r", output)
         lang_code = ""
 
     return lang_code
@@ -88,7 +89,12 @@ def configure_locale() -> None:
         if code != "":
             os.environ["LANG"] = f"{code}.utf-8"
 
-    locale.setlocale(locale.LC_ALL, "")
+    # Get locale settings from OS, fall back to en_US or C in case of error for minimalist or misconfigured systems
+    try:
+        locale.setlocale(locale.LC_ALL, "")
+    except locale.Error:
+        locale.setlocale(locale.LC_ALL, "C")
+        logger.error("Couldn't set the locale: unsupported locale setting; falling back to 'C' locale")
     sys.stdout.reconfigure(encoding=sys.getdefaultencoding())  # type: ignore[union-attr]
     sys.stderr.reconfigure(encoding=sys.getdefaultencoding())  # type: ignore[union-attr]
     sys.stdin.reconfigure(encoding=sys.getdefaultencoding())  # type: ignore[union-attr]
@@ -111,6 +117,7 @@ class App:
         self.initial_arg_parser = ctsettings.initial_commandline_parser()
         self.config_load_success = False
         self.talkers: dict[str, ComicTalker]
+        self.metron_location = ""
 
     def run(self) -> None:
         configure_locale()
@@ -125,11 +132,22 @@ class App:
     def load_plugins(self, opts: argparse.Namespace) -> None:
         local_plugins = plugin_finder.find_plugins(opts.config.user_plugin_dir)
 
+        for talker in local_plugins.talkers.copy():
+            if (
+                talker.entry_name == "metron"
+                or "metron" in talker.obj.website.casefold()
+                or "metron" in talker.obj.__module__.casefold()
+            ):
+                self.metron_location = f"Local package {str(talker.plugin.path.absolute())}"
+                local_plugins.talkers.remove(talker)
+                continue
+
         comicapi.comicarchive.load_archive_plugins(local_plugins=[p.obj for p in local_plugins.archivers])
         comicapi.comicarchive.load_tag_plugins(version=version, local_plugins=[p.obj for p in local_plugins.tags])
-        self.talkers = comictalker.get_talkers(
+        self.talkers, metron_location = comictalker.get_talkers(
             version, opts.config.user_cache_dir, local_plugins=[p.obj for p in local_plugins.talkers]
         )
+        self.metron_location = metron_location or self.metron_location
 
     def list_plugins(
         self,
@@ -246,14 +264,7 @@ class App:
         # config already loaded
         error = None
 
-        if (
-            not self.config[0].Metadata_Options__cr
-            and "cr" in comicapi.comicarchive.tags
-            and comicapi.comicarchive.tags["cr"].enabled
-        ):
-            comicapi.comicarchive.tags["cr"].enabled = False
-
-        if len(self.talkers) < 1:
+        if not self.talkers:
             error = (
                 "Failed to load any talkers, please re-install and check the log located in '"
                 + str(self.config[0].Runtime_Options__config.user_log_dir)
@@ -270,6 +281,13 @@ class App:
         comicapi.utils.load_publishers()
         update_publishers(self.config)
 
+        def add_publisher_to_lexer(publisher: str) -> None:
+            publisher = publisher.casefold()
+            if " " not in publisher and publisher not in comicapi.filenamelexer.key:
+                comicapi.filenamelexer.key[publisher] = comicapi.filenamelexer.ItemType.Publisher
+
+        for publisher in comicapi.utils.publishers:
+            add_publisher_to_lexer(publisher)
         if self.config[0].Commands__command == Action.list_plugins:
             self.list_plugins(
                 list(self.talkers.values()),
@@ -295,6 +313,11 @@ class App:
             )
 
         if not self.config[0].Runtime_Options__no_gui:
+            if self.metron_location:
+                error = (
+                    f"Metron is no longer supported please remove the metron plugin: {self.metron_location}.\n\nSee https://github.com/comictagger/comictagger/issues/783 for more details.",
+                    True,
+                )
             try:
                 from comictaggerlib import gui
 
@@ -303,8 +326,14 @@ class App:
                 return gui.open_tagger_window(self.talkers, self.config, error)
             except ImportError:
                 self.config[0].Runtime_Options__no_gui = True
-                logger.warning("PyQt5 is not available. ComicTagger is limited to command-line mode.")
+                logger.warning("PyQt6 is not available. ComicTagger is limited to command-line mode.")
 
+        if self.metron_location:
+            print(  # noqa: T201
+                f"Metron is no longer supported please remove the metron plugin: {self.metron_location}.\nSee https://github.com/comictagger/comictagger/issues/783 for more details.",
+                True,
+            )
+            raise SystemExit(9)
         # GUI mode is not available or CLI mode was requested
         if error and error[1]:
             print(f"A fatal error occurred please check the log for more information: {error[0]}")  # noqa: T201

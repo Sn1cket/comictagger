@@ -6,31 +6,29 @@ import io
 import logging
 import traceback
 import webbrowser
-from collections.abc import Sequence
-
-from PyQt5.QtCore import QUrl
-from PyQt5.QtWidgets import QWidget
+from collections.abc import Collection, Sequence
 
 logger = logging.getLogger(__name__)
 
 try:
-    from PyQt5 import QtGui, QtWidgets
-    from PyQt5.QtCore import Qt
+    from PyQt6 import QtGui, QtWidgets
+    from PyQt6.QtCore import Qt, QUrl
+    from PyQt6.QtGui import QGuiApplication, QPalette
+    from PyQt6.QtWidgets import QWidget
 
     qt_available = True
-except ImportError:
-    qt_available = False
 
-if qt_available:
     try:
         from PIL import Image
 
         pil_available = True
     except ImportError:
         pil_available = False
+    active_palette: QPalette | None = None
 
     try:
-        from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineView
+        from PyQt6.QtWebEngineCore import QWebEnginePage
+        from PyQt6.QtWebEngineWidgets import QWebEngineView
 
         class WebPage(QWebEnginePage):
             def acceptNavigationRequest(
@@ -53,6 +51,7 @@ if qt_available:
             webengine.setPage(WebPage(parent))
             webengine.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
             settings = webengine.settings()
+            assert settings is not None
             settings.setAttribute(settings.WebAttribute.AutoLoadImages, True)
             settings.setAttribute(settings.WebAttribute.JavascriptEnabled, False)
             settings.setAttribute(settings.WebAttribute.JavascriptCanOpenWindows, False)
@@ -122,8 +121,17 @@ if qt_available:
         # And the move call repositions the window
         window.move(hpos + main_window_size.left(), vpos + main_window_size.top())
 
+    def is_dark_mode() -> bool:
+        return QGuiApplication.styleHints().colorScheme() == Qt.ColorScheme.Dark
+
     def get_qimage_from_data(image_data: bytes) -> QtGui.QImage:
         img = QtGui.QImage()
+
+        if not image_data:
+            logger.warning("Empty image data.")
+            img.load(":/graphics/nocover.png")
+            return img
+
         success = img.loadFromData(image_data)
         if not success:
             try:
@@ -133,7 +141,7 @@ if qt_available:
                     Image.open(io.BytesIO(image_data)).save(buffer, format="ppm")
                     success = img.loadFromData(buffer.getvalue())
             except Exception:
-                logger.exception("Failed to load the image")
+                logger.exception("Failed to load the image.")
         # if still nothing, go with default image
         if not success:
             img.load(":/graphics/nocover.png")
@@ -144,11 +152,9 @@ if qt_available:
         if e:
             trace = "\n".join(traceback.format_exception(type(e), e, e.__traceback__))
 
-        QtWidgets.QMessageBox.critical(QtWidgets.QMainWindow(), "Error", msg + trace)
+        return critical(QtWidgets.QMainWindow(), "Error", msg + trace)
 
-    active_palette = None
-
-    def enable_widget(widget: QtWidgets.QWidget | list[QtWidgets.QWidget], enable: bool) -> None:
+    def enable_widget(widget: QtWidgets.QWidget | Collection[QtWidgets.QWidget], enable: bool) -> None:
         if isinstance(widget, Sequence):
             for w in widget:
                 _enable_widget(w, enable)
@@ -156,8 +162,7 @@ if qt_available:
             _enable_widget(widget, enable)
 
     def _enable_widget(widget: QtWidgets.QWidget, enable: bool) -> None:
-        global active_palette
-        if not (widget is not None and active_palette is not None):
+        if widget is None or active_palette is None:
             return
         active_color = active_palette.color(QtGui.QPalette.ColorRole.Base)
 
@@ -190,7 +195,7 @@ if qt_available:
             if isinstance(widget, (QtWidgets.QTextEdit, QtWidgets.QLineEdit, QtWidgets.QAbstractSpinBox)):
                 widget.setReadOnly(False)
             elif isinstance(widget, QtWidgets.QListWidget):
-                widget.setMovement(QtWidgets.QListWidget.Free)
+                widget.setMovement(QtWidgets.QListWidget.Movement.Free)
         else:
             if isinstance(widget, QtWidgets.QTableWidgetItem):
                 widget.setBackground(inactive_brush)
@@ -207,7 +212,7 @@ if qt_available:
             elif isinstance(widget, QtWidgets.QListWidget):
                 inactive_palette = palettes()
                 widget.setPalette(inactive_palette[0])
-                widget.setMovement(QtWidgets.QListWidget.Static)
+                widget.setMovement(QtWidgets.QListWidget.Movement.Static)
 
     def replaceWidget(
         layout: QtWidgets.QLayout | QtWidgets.QSplitter, old_widget: QtWidgets.QWidget, new_widget: QtWidgets.QWidget
@@ -231,3 +236,27 @@ if qt_available:
         # QSplitter has issues with replacing a widget before it's been first shown. Assume it should be visible
         new_widget.show()
         return new_widget
+
+    def critical(parent: QWidget | None, title: str, text: str) -> None:
+        qmsg = QtWidgets.QMessageBox(parent=parent)
+        qmsg.setIcon(qmsg.Icon.Critical)
+        qmsg.setText(title)
+        qmsg.setInformativeText(text)
+        return qmsg.show()
+
+    def warning(parent: QWidget | None, title: str, text: str) -> None:
+        qmsg = QtWidgets.QMessageBox(parent=parent)
+        qmsg.setIcon(qmsg.Icon.Warning)
+        qmsg.setText(title)
+        qmsg.setInformativeText(text)
+        return qmsg.show()
+
+    def information(parent: QWidget | None, title: str, text: str) -> None:
+        qmsg = QtWidgets.QMessageBox(parent=parent)
+        qmsg.setIcon(qmsg.Icon.Information)
+        qmsg.setText(title)
+        qmsg.setInformativeText(text)
+        return qmsg.show()
+
+except ImportError:
+    qt_available = False

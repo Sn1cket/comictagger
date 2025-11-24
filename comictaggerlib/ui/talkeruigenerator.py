@@ -6,10 +6,11 @@ from pathlib import Path
 from typing import Any, NamedTuple, cast
 
 import settngs
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 from comictaggerlib.coverimagewidget import CoverImageWidget
 from comictaggerlib.ctsettings import ct_ns, group_for_plugin
+from comictaggerlib.ui import qtutils
 from comictalker.comictalker import ComicTalker
 
 logger = logging.getLogger(__name__)
@@ -39,11 +40,13 @@ class PasswordEdit(QtWidgets.QLineEdit):
         self.visibleIcon = QtGui.QIcon(":/graphics/eye.svg")
         self.hiddenIcon = QtGui.QIcon(":/graphics/hidden.svg")
 
-        self.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
 
         if show_visibility:
             # Add the password hide/shown toggle at the end of the edit box.
-            self.togglepasswordAction = self.addAction(self.visibleIcon, QtWidgets.QLineEdit.TrailingPosition)
+            self.togglepasswordAction = self.addAction(
+                self.visibleIcon, QtWidgets.QLineEdit.ActionPosition.TrailingPosition
+            )
             self.togglepasswordAction.setToolTip("Show password")
             self.togglepasswordAction.triggered.connect(self.on_toggle_password_action)
 
@@ -51,12 +54,12 @@ class PasswordEdit(QtWidgets.QLineEdit):
 
     def on_toggle_password_action(self) -> None:
         if not self.password_shown:
-            self.setEchoMode(QtWidgets.QLineEdit.Normal)
+            self.setEchoMode(QtWidgets.QLineEdit.EchoMode.Normal)
             self.password_shown = True
             self.togglepasswordAction.setIcon(self.hiddenIcon)
             self.togglepasswordAction.setToolTip("Hide password")
         else:
-            self.setEchoMode(QtWidgets.QLineEdit.Password)
+            self.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
             self.password_shown = False
             self.togglepasswordAction.setIcon(self.visibleIcon)
             self.togglepasswordAction.setToolTip("Show password")
@@ -74,9 +77,9 @@ def generate_api_widgets(
     def call_check_api(*args: Any, tab: TalkerTab, talker: ComicTalker, definitions: settngs.Definitions) -> None:
         check_text, check_bool = talker.check_status(get_config_from_tab(tab, definitions[group_for_plugin(talker)]))
         if check_bool:
-            QtWidgets.QMessageBox.information(None, "API Test Success", check_text)
-        else:
-            QtWidgets.QMessageBox.warning(None, "API Test Failed", check_text)
+            return qtutils.information(tab.tab, "API Test Success", check_text)
+
+        qtutils.warning(tab.tab, "API Test Failed", check_text)
 
     # get the actual config objects in case they have overwritten the default
     btn_test_row = None
@@ -125,7 +128,7 @@ def generate_spinbox(option: settngs.Setting, layout: QtWidgets.QGridLayout) -> 
     widget = QtWidgets.QSpinBox()
     widget.setRange(0, 9999)
     widget.setToolTip(option.help)
-    layout.addWidget(widget, row, 1, alignment=QtCore.Qt.AlignLeft)
+    layout.addWidget(widget, row, 1, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
 
     return widget
 
@@ -138,7 +141,7 @@ def generate_doublespinbox(option: settngs.Setting, layout: QtWidgets.QGridLayou
     widget = QtWidgets.QDoubleSpinBox()
     widget.setRange(0, 9999.99)
     widget.setToolTip(option.help)
-    layout.addWidget(widget, row, 1, alignment=QtCore.Qt.AlignLeft)
+    layout.addWidget(widget, row, 1, alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
 
     return widget
 
@@ -223,8 +226,8 @@ def generate_talker_info(talker: ComicTalker, config: settngs.Config[ct_ns], lay
 
     # Add horizontal divider
     line = QtWidgets.QFrame()
-    line.setFrameShape(QtWidgets.QFrame.HLine)
-    line.setFrameShadow(QtWidgets.QFrame.Sunken)
+    line.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+    line.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
     layout.addWidget(line, row + 3, 0, 1, -1)
 
 
@@ -351,18 +354,23 @@ def generate_source_option_tabs(
 
     talker_layout = QtWidgets.QGridLayout()
     lbl_select_talker = QtWidgets.QLabel("Metadata Source:")
+    lbl_more_sources = QtWidgets.QLabel(
+        "Find more metadata plugin sources <a href='https://github.com/comictagger/comictagger/wiki/Comic-and-Manga-Information-Sources'>here</a>"
+    )
+    lbl_more_sources.setOpenExternalLinks(True)
     line = QtWidgets.QFrame()
-    line.setFrameShape(QtWidgets.QFrame.HLine)
-    line.setFrameShadow(QtWidgets.QFrame.Sunken)
+    line.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+    line.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
     talker_tabs = QtWidgets.QTabWidget()
 
     # Store all widgets as to allow easier access to their values vs. using findChildren etc. on the tab widget
     sources: Sources = Sources(QtWidgets.QComboBox(), [])
 
-    talker_layout.addWidget(lbl_select_talker, 0, 0, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Maximum)
-    talker_layout.addWidget(sources[0], 0, 1, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Maximum)
+    talker_layout.addWidget(lbl_select_talker, 0, 0)
+    talker_layout.addWidget(sources[0], 0, 1, 1, 3)
     talker_layout.addWidget(line, 1, 0, 1, -1)
     talker_layout.addWidget(talker_tabs, 2, 0, 1, -1)
+    talker_layout.addWidget(lbl_more_sources, 4, 0)
 
     comic_talker_tab_layout.addLayout(talker_layout)
 
@@ -425,7 +433,7 @@ def generate_source_option_tabs(
                 tab.widgets[option.setting_name] = current_widget
             else:
                 # We didn't create anything for this dest
-                logger.debug(f"Unsupported talker option found. Name: {option.internal_name} Type: {option.type}")
+                logger.debug("Unsupported talker option found. Name: %s Type: %s", option.internal_name, option.type)
                 continue
             # Mark this destination as being created
             dest_created.add(option.dest)
@@ -440,7 +448,9 @@ def generate_source_option_tabs(
         generate_api_widgets(talker, tab, key_option, url_option, layout_grid, definitions=config.definitions)
 
         # Add vertical spacer
-        vspacer = QtWidgets.QSpacerItem(20, 40, QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Expanding)
+        vspacer = QtWidgets.QSpacerItem(
+            20, 40, QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Expanding
+        )
         layout_grid.addItem(vspacer, layout_grid.rowCount() + 1, 0)
         # Display the new widgets
         tab.tab.setLayout(layout_grid)

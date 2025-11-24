@@ -1,4 +1,4 @@
-"""A PyQt5 widget for editing the page list info"""
+"""A PyQt6 widget for editing the page list info"""
 
 #
 # Copyright 2012-2014 ComicTagger Authors
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 
-from PyQt5 import QtCore, QtWidgets, uic
+from PyQt6 import QtCore, QtGui, QtWidgets, uic
 
 from comicapi.comicarchive import ComicArchive, tags
 from comicapi.genericmetadata import GenericMetadata, PageMetadata, PageType
@@ -145,7 +145,7 @@ class PageListEditor(QtWidgets.QWidget):
         if show_shortcut:
             text = text + " (" + shortcut + ")"
         self.cbPageType.addItem(text, user_data)
-        action_item = QtWidgets.QAction(shortcut, self)
+        action_item = QtGui.QAction(shortcut, self)
         action_item.triggered.connect(lambda: self.select_page_type_item(self.cbPageType.findData(user_data)))
         action_item.setShortcut(shortcut)
         self.addAction(action_item)
@@ -170,7 +170,7 @@ class PageListEditor(QtWidgets.QWidget):
             return
         md = GenericMetadata(pages=self.get_page_list())
         double_pages = [bool(x.double_page) for x in md.pages]
-        self.comic_archive.apply_archive_info_to_metadata(md, True, True)
+        self.comic_archive.apply_archive_info_to_metadata(md, True, True, hash_archive="")
         self.set_data(self.comic_archive, pages_list=md.pages)
         if double_pages != [bool(x.double_page) for x in md.pages]:
             self.modified.emit()
@@ -188,8 +188,8 @@ class PageListEditor(QtWidgets.QWidget):
         for x in selection:
             current = x.row()
             old_indexes.append(current)
-            if 0 <= current + movement <= self.listWidget.count() - 1:
-                if len(new_indexes) < 1 or current + movement != new_indexes[-1]:
+            if 0 <= (current + movement) <= self.listWidget.count() - 1:
+                if (not new_indexes) or (current + movement) != new_indexes[-1]:
                     current += movement
 
             new_indexes.append(current)
@@ -351,7 +351,7 @@ class PageListEditor(QtWidgets.QWidget):
         self.comic_archive = comic_archive
         self.pages_list = pages_list
         if pages_list:
-            self.select_read_tags(self.tag_ids)
+            self.select_write_tags(self.tag_ids)
         else:
             self.cbPageType.setEnabled(False)
             self.chkDoublePage.setEnabled(False)
@@ -396,7 +396,7 @@ class PageListEditor(QtWidgets.QWidget):
             self.first_front_page = self.get_first_front_cover()
             self.firstFrontCoverChanged.emit(self.first_front_page)
 
-    def select_read_tags(self, tag_ids: list[str]) -> None:
+    def select_write_tags(self, tag_ids: list[str]) -> None:
         # depending on the current tags, certain fields are disabled
         if not tag_ids:
             return

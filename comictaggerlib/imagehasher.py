@@ -20,6 +20,7 @@ import io
 import itertools
 import logging
 import math
+import statistics
 from collections.abc import Sequence
 from statistics import median
 from typing import TypeVar
@@ -35,7 +36,12 @@ logger = logging.getLogger(__name__)
 
 class ImageHasher:
     def __init__(
-        self, path: str | None = None, image: Image | None = None, data: bytes = b"", width: int = 8, height: int = 8
+        self,
+        path: str | None = None,
+        image: Image.Image | None = None,
+        data: bytes = b"",
+        width: int = 8,
+        height: int = 8,
     ) -> None:
         self.width = width
         self.height = height
@@ -65,13 +71,14 @@ class ImageHasher:
             return 0
 
         pixels = list(image.getdata())
-        avg = sum(pixels) / len(pixels)
+        avg = statistics.mean(pixels)
 
-        diff = "".join(str(int(p > avg)) for p in pixels)
+        h = 0
+        for i, p in enumerate(pixels):
+            if p > avg:
+                h |= 1 << len(pixels) - 1 - i
 
-        result = int(diff, 2)
-
-        return result
+        return h
 
     def difference_hash(self) -> int:
         try:
@@ -81,24 +88,25 @@ class ImageHasher:
             return 0
 
         pixels = list(image.getdata())
-        diff = ""
+        h = 0
+        z = (self.width * self.height) - 1
         for y in range(self.height):
             for x in range(self.width):
-                idx = x + (self.width + 1 * y)
-                diff += str(int(pixels[idx] < pixels[idx + 1]))
+                idx = x + ((self.width + 1) * y)
+                if pixels[idx] < pixels[idx + 1]:
+                    h |= 1 << z
+                z -= 1
 
-        result = int(diff, 2)
+        return h
 
-        return result
-
-    def p_hash(self) -> int:
+    def perception_hash(self) -> int:
         """
         Pure python version of Perceptual Hash computation of https://github.com/JohannesBuchner/imagehash/tree/master
         Implementation follows http://www.hackerfactor.com/blog/index.php?/archives/432-Looks-Like-It.html
         """
 
-        def generate_dct2(block: Sequence[Sequence[float]], axis: int = 0) -> list[list[float]]:
-            def dct1(block: Sequence[float]) -> list[float]:
+        def generate_dct2(block: Sequence[Sequence[float | int]], axis: int = 0) -> list[list[float | int]]:
+            def dct1(block: Sequence[float | int]) -> list[float | int]:
                 """Perform 1D Discrete Cosine Transform (DCT) on a given block."""
                 N = len(block)
                 dct_block = [0.0] * N
@@ -115,7 +123,7 @@ class ImageHasher:
             """Perform 2D Discrete Cosine Transform (DCT) on a given block along the specified axis."""
             rows = len(block)
             cols = len(block[0])
-            dct_block = [[0.0] * cols for _ in range(rows)]
+            dct_block: list[list[float | int]] = [[0.0] * cols for _ in range(rows)]
 
             if axis == 0:
                 # Apply 1D DCT on each row
@@ -133,17 +141,12 @@ class ImageHasher:
 
             return dct_block
 
-        def convert_image_to_ndarray(image: Image.Image) -> Sequence[Sequence[float]]:
-            width, height = image.size
+        def convert_to_array(data: list[float | int]) -> list[list[float | int]]:
 
             pixels2 = []
-            for y in range(height):
-                row = []
-                for x in range(width):
-                    pixel = image.getpixel((x, y))
-                    row.append(pixel)
-                pixels2.append(row)
-
+            for row in range(32):
+                x = row * 32
+                pixels2.append(data[x : x + 32])
             return pixels2
 
         highfreq_factor = 4
@@ -155,16 +158,18 @@ class ImageHasher:
             logger.exception("p_hash error converting to greyscale and resizing")
             return 0
 
-        pixels = convert_image_to_ndarray(image)
+        pixels = convert_to_array(list(image.getdata()))
+
         dct = generate_dct2(generate_dct2(pixels, axis=0), axis=1)
         dctlowfreq = list(itertools.chain.from_iterable(row[:8] for row in dct[:8]))
         med = median(dctlowfreq)
-        # Convert to a bit string
-        diff = "".join(str(int(item > med)) for item in dctlowfreq)
 
-        result = int(diff, 2)
+        h = 0
+        for i, p in enumerate(dctlowfreq):
+            if p > med:
+                h |= 1 << len(dctlowfreq) - 1 - i
 
-        return result
+        return h
 
     # accepts 2 hashes (longs or hex strings) and returns the hamming distance
 
@@ -185,5 +190,4 @@ class ImageHasher:
         # xor the two numbers
         n = n1 ^ n2
 
-        # count up the 1's in the binary string
-        return sum(b == "1" for b in bin(n)[2:])
+        return bin(n).count("1")
